@@ -10,8 +10,8 @@ android {
         applicationId "com.example.driverlogger"
         minSdk 30
         targetSdk 34
-        versionCode 8
-        versionName "3.4"
+        versionCode 9
+        versionName "3.5"
     }
 
     compileOptions {
@@ -21,6 +21,5 @@ android {
 }
 
 dependencies {
-    // On-device text recognition (model is bundled, works offline). Used to read Uber offer cards.
     implementation 'com.google.mlkit:text-recognition:16.0.0'
 }

@@ -27,13 +27,13 @@ import java.util.Locale;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
-/** Settings, capture folder, pruning and export. */
+/** Settings, capture folder, pruning, export, and Standby Mode. */
 final class Store {
     static final String PREFS = "logger";
     static final String KEY_APPS = "apps";
     static final String KEY_ALWAYS = "always";
+    static final String KEY_STANDBY = "standby";
 
-    /** Rolling limits: the oldest files are deleted once these are exceeded. */
     static final int MAX_TXT = 4000;
     static final int MAX_JPG = 1500;
 
@@ -53,8 +53,29 @@ final class Store {
     static final String KEY_QUIET_START = "quietStart";
     static final String KEY_QUIET_END = "quietEnd";
 
+    static final String KEY_PILL_FORMAT = "pillFormat";
+    static final String KEY_PILL_STYLE = "pillStyle";
+    static final String KEY_PILL_SIZE = "pillSize";
+    static final String KEY_PILL_POS = "pillPos";
+    static final String KEY_PILL_DURATION = "pillDuration";
+
+    static final String KEY_DIAG_OCR_RUNS = "diagOcrRuns";
+    static final String KEY_DIAG_OCR_RETRIES = "diagOcrRetries";
+    static final String KEY_DIAG_OCR_UNREAD = "diagOcrUnread";
+    static final String KEY_DIAG_SHOT_FAILS = "diagShotFails";
+
     static final int MODE_LOG = 0;
     static final int MODE_ALERT = 1;
+
+    static final int FORMAT_STANDARD = 0;
+    static final int FORMAT_RATE_FIRST = 1;
+    static final int FORMAT_RATE_ONLY = 2;
+    static final int FORMAT_DETAILED = 3;
+
+    static final int STYLE_DARK_SLATE = 0;
+    static final int STYLE_NEON_GREEN = 1;
+    static final int STYLE_MATRIX = 2;
+    static final int STYLE_GOLD = 3;
 
     static final String DEFAULT_APPS =
             "com.ubercab.driver\ncom.lyft.android.driver\nus.mi.hich.driver";
@@ -71,7 +92,6 @@ final class Store {
         return d;
     }
 
-    /** Short-lived holding area for screenshots that have not (yet) been judged worth keeping. */
     static File pendingDir(Context c) {
         File d = new File(c.getFilesDir(), "pending");
         if (!d.exists()) d.mkdirs();
@@ -82,6 +102,14 @@ final class Store {
         File[] files = pendingDir(c).listFiles();
         if (files == null) return;
         for (File f : files) f.delete();
+    }
+
+    static boolean isStandby(Context c) {
+        return prefs(c).getBoolean(KEY_STANDBY, false);
+    }
+
+    static void setStandby(Context c, boolean v) {
+        prefs(c).edit().putBoolean(KEY_STANDBY, v).apply();
     }
 
     static String getAppsText(Context c) {
@@ -107,9 +135,6 @@ final class Store {
     static void setAlways(Context c, boolean v) {
         prefs(c).edit().putBoolean(KEY_ALWAYS, v).apply();
     }
-
-
-    // ---------------------------------------------------------------- v3 settings
 
     static int getMode(Context c) {
         return prefs(c).getInt(KEY_MODE, MODE_LOG);
@@ -143,7 +168,59 @@ final class Store {
         return prefs(c).getBoolean(KEY_SOUND, false);
     }
 
-    // ---------------------------------------------------------------- v3.4 settings
+    static int getPillFormat(Context c) {
+        return prefs(c).getInt(KEY_PILL_FORMAT, FORMAT_STANDARD);
+    }
+
+    static void setPillFormat(Context c, int fmt) {
+        prefs(c).edit().putInt(KEY_PILL_FORMAT, fmt).apply();
+    }
+
+    static int getPillStyle(Context c) {
+        return prefs(c).getInt(KEY_PILL_STYLE, STYLE_DARK_SLATE);
+    }
+
+    static void setPillStyle(Context c, int style) {
+        prefs(c).edit().putInt(KEY_PILL_STYLE, style).apply();
+    }
+
+    static int getPillSize(Context c) {
+        return prefs(c).getInt(KEY_PILL_SIZE, 22);
+    }
+
+    static int getPillPos(Context c) {
+        return prefs(c).getInt(KEY_PILL_POS, 8);
+    }
+
+    static int getPillDuration(Context c) {
+        return prefs(c).getInt(KEY_PILL_DURATION, 3);
+    }
+
+    static void savePillSettings(Context c, int sizeSp, int posPct, int durationSec) {
+        prefs(c).edit()
+                .putInt(KEY_PILL_SIZE, Math.max(14, Math.min(38, sizeSp)))
+                .putInt(KEY_PILL_POS, Math.max(3, Math.min(85, posPct)))
+                .putInt(KEY_PILL_DURATION, Math.max(2, Math.min(8, durationSec)))
+                .apply();
+    }
+
+    static synchronized void incDiag(Context c, String key) {
+        SharedPreferences p = prefs(c);
+        p.edit().putInt(key, p.getInt(key, 0) + 1).apply();
+    }
+
+    static int getDiag(Context c, String key) {
+        return prefs(c).getInt(key, 0);
+    }
+
+    static void resetDiag(Context c) {
+        prefs(c).edit()
+                .putInt(KEY_DIAG_OCR_RUNS, 0)
+                .putInt(KEY_DIAG_OCR_RETRIES, 0)
+                .putInt(KEY_DIAG_OCR_UNREAD, 0)
+                .putInt(KEY_DIAG_SHOT_FAILS, 0)
+                .apply();
+    }
 
     static boolean getAutoOpen(Context c) {
         return prefs(c).getBoolean(KEY_AUTO_OPEN, true);
@@ -169,12 +246,10 @@ final class Store {
         prefs(c).edit().putBoolean(KEY_QUIET_ON, v).apply();
     }
 
-    /** Minutes after midnight. Default 11:00 PM. */
     static int getQuietStart(Context c) {
         return prefs(c).getInt(KEY_QUIET_START, 23 * 60);
     }
 
-    /** Minutes after midnight. Default 7:30 AM. The window runs from start up to, not including, end. */
     static int getQuietEnd(Context c) {
         return prefs(c).getInt(KEY_QUIET_END, 7 * 60 + 30);
     }
@@ -183,7 +258,6 @@ final class Store {
         prefs(c).edit().putInt(KEY_QUIET_START, start).putInt(KEY_QUIET_END, end).apply();
     }
 
-    /** True when the current time of day is inside the quiet window. */
     static boolean quietNow(Context c) {
         Calendar cal = Calendar.getInstance();
         int m = cal.get(Calendar.HOUR_OF_DAY) * 60 + cal.get(Calendar.MINUTE);
@@ -226,8 +300,6 @@ final class Store {
                 .apply();
     }
 
-    // ---------------------------------------------------------------- v3 offer history
-
     private static File offersFile(Context c) {
         return new File(c.getFilesDir(), "offers.jsonl");
     }
@@ -254,7 +326,6 @@ final class Store {
         }
     }
 
-    /** Oldest first. */
     private static List<JSONObject> readOffers(Context c) {
         List<JSONObject> out = new ArrayList<>();
         File f = offersFile(c);
@@ -272,7 +343,6 @@ final class Store {
         return out;
     }
 
-    /** Newest first. */
     static synchronized List<JSONObject> recentOffers(Context c, int max) {
         List<JSONObject> all = readOffers(c);
         Collections.reverse(all);
@@ -315,15 +385,15 @@ final class Store {
         clearPending(c);
         new File(c.getFilesDir(), "events.log").delete();
         offersFile(c).delete();
+        resetDiag(c);
     }
 
-    /** Writes a zip into Downloads and returns its file name. */
     static String exportZip(Context c, boolean withShots) throws IOException {
         File[] files = sorted(c);
         if (files.length == 0) throw new IOException("nothing to export yet");
 
         String stamp = new SimpleDateFormat("yyyyMMdd_HHmm", Locale.US).format(new Date());
-        String name = "DriverLog_" + stamp + (withShots ? "" : "_text") + ".zip";
+        String name = "Driverade_" + stamp + (withShots ? "" : "_text") + ".zip";
 
         ContentValues v = new ContentValues();
         v.put(MediaStore.MediaColumns.DISPLAY_NAME, name);

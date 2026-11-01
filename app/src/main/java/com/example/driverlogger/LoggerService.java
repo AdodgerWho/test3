@@ -38,25 +38,19 @@ import java.util.ArrayList;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.Locale;
+import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.regex.Pattern;
 
 /**
- * Logs the accessibility tree of the watched apps (including overlay windows) plus screenshots.
- *
- * v2.1: screenshots are taken continuously into a short-lived "pending" folder and are only kept
- * permanently when something interesting happens (offer-like text, a notification, a change of
- * screen state, a new window, or a big visual change while a watched app is present). When that
- * happens the previous PRE_ROLL_MS of shots are kept too, and new shots are kept for POST_ROLL_MS.
- * Near-identical shots are never stored. Everything else is deleted automatically.
+ * Driverade LoggerService with Standby Mode support, unified screenshot coordination, and OCR retry.
  */
 public class LoggerService extends AccessibilityService {
-    static final int DEBOUNCE_MS = 400;
+    static final int DEBOUNCE_MS = 350;
     static final int TIMED_MS = 1200;
-    static final int MIN_SHOT_GAP_MS = 1100;
+    static final int MIN_SHOT_GAP_MS = 1050;
     static final int SHOT_WIDTH = 720;
     static final int JPEG_QUALITY = 55;
     static final int MAX_NODES = 1500;
@@ -68,12 +62,14 @@ public class LoggerService extends AccessibilityService {
     static final long VISUAL_COOLDOWN_MS = 8000;
 
     static volatile boolean running = false;
+    static volatile LoggerService instance = null;
 
-    /** Matches Accept buttons such as text="Accept" or text="Accept • $20.01". */
-    private static final Pattern ACCEPT = Pattern.compile("(text|desc)=\"Accept( \u2022[^\"]*)?\"");
+    private static final Pattern ACCEPT = Pattern.compile("(text|desc)=\"(Accept|Match)( \u2022[^"]*)?\"");
+    private static final Pattern HAS_DOLLAR = Pattern.compile("(text|desc)="[^"]*\$\d+");
+    private static final Pattern BOUNDS_STRIP = Pattern.compile(" bounds=-?\d+,-?\d+,-?\d+,-?\d+");
     private static final String[] MARKERS = {
             "text=\"Decline\"", "Reject ride", "est. rate for this ride", "eservation request",
-            "request matching", "Matched to trip", "xclusive", "Scheduled ride",
+            "request matching", "Matched to trip", "xclusive", "Scheduled ride", "Trip Radar",
             "Picking up", "Waiting for rider", "Dropping off", "Finding trips",
             "Waiting for requests", "You're offline", "You're online", "You're Online",
             "GO OFFLINE", "Go Offline",
@@ -96,12 +92,14 @@ public class LoggerService extends AccessibilityService {
     private static final long PRIORITY_GAP_MS = 6000;
     private static final long PRIORITY_NOTE_GAP_MS = 30000;
     private static final long OFFER_REPEAT_MS = 90000;
-    private static final long OCR_GAP_MS = 1500;
+    private static final long OCR_GAP_MS = 1100;
 
     private Flasher flasher;
     private TextRecognizer recognizer;
     private final Map<String, Long> offerSeen = new HashMap<>();
     private Rect blankUber = null;
+    private volatile Rect pendingOcrBounds = null;
+    private int unreadOcrRetries = 0;
     private long lastOcr = 0;
     private long flashUntil = 0;
     private long lastPriorityTap = 0;
@@ -114,10 +112,11 @@ public class LoggerService extends AccessibilityService {
     private long fastUntil = 0;
     private final Map<String, HichRide> hichRides = new HashMap<>();
     private volatile boolean ocrBusy = false;
+    private boolean ocrRetryScheduled = false;
 
-    // main thread only
     private boolean scheduled = false;
-    private String lastBody = "";
+    private String lastBodySig = "";
+    private long lastTxtWriteMs = 0;
     private long lastShot = 0;
     private List<String> watched = null;
     private long watchedLoadedAt = 0;
@@ -126,7 +125,6 @@ public class LoggerService extends AccessibilityService {
     private int lastState = -1;
     private volatile boolean watchedPresent = false;
 
-    // io thread only
     private int writes = 0;
     private int[] lastSig = null;
     private int[] prevSig = null;
@@ -138,12 +136,27 @@ public class LoggerService extends AccessibilityService {
         @Override
         public void run() {
             try {
-                PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
-                if (pm != null && pm.isInteractive()) capture("", false, true);
+                if (!Store.isStandby(LoggerService.this)) {
+                    PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
+                    if (pm != null && pm.isInteractive()) capture("", false, true);
+                }
             } catch (Throwable t) {
                 logLine("tick error: " + t);
             }
             handler.postDelayed(this, TIMED_MS);
+        }
+    };
+
+    private final Runnable ocrRetryRunnable = new Runnable() {
+        @Override
+        public void run() {
+            ocrRetryScheduled = false;
+            Rect r = pendingOcrBounds;
+            if (r != null && !Store.isStandby(LoggerService.this)) {
+                String base = "cap_" + new SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US)
+                        .format(new Date(System.currentTimeMillis()));
+                shoot(base, true, r);
+            }
         }
     };
 
@@ -163,6 +176,7 @@ public class LoggerService extends AccessibilityService {
             setServiceInfo(info);
         }
         running = true;
+        instance = this;
         flasher = new Flasher(this);
         try {
             recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS);
@@ -176,9 +190,7 @@ public class LoggerService extends AccessibilityService {
                 Store.clearPending(LoggerService.this);
             }
         });
-        logLine("SERVICE CONNECTED, watching " + Store.getApps(this)
-                + ", mode " + (Store.getMode(this) == Store.MODE_ALERT ? "ALERT" : "LOG")
-                + ", rolling screenshot buffer " + (Store.isAlways(this) ? "ALWAYS" : "only with watched app visible"));
+        logLine("SERVICE CONNECTED, watching " + Store.getApps(this));
         handler.removeCallbacks(tick);
         handler.postDelayed(tick, TIMED_MS);
     }
@@ -186,6 +198,7 @@ public class LoggerService extends AccessibilityService {
     @Override
     public boolean onUnbind(Intent intent) {
         running = false;
+        instance = null;
         if (flasher != null) flasher.remove();
         handler.removeCallbacksAndMessages(null);
         return super.onUnbind(intent);
@@ -194,6 +207,7 @@ public class LoggerService extends AccessibilityService {
     @Override
     public void onDestroy() {
         running = false;
+        instance = null;
         if (flasher != null) flasher.remove();
         if (recognizer != null) recognizer.close();
         handler.removeCallbacksAndMessages(null);
@@ -204,9 +218,25 @@ public class LoggerService extends AccessibilityService {
     public void onInterrupt() {
     }
 
+    static boolean triggerTestAlert(Offers.Offer sample) {
+        final LoggerService svc = instance;
+        if (svc == null || svc.flasher == null) return false;
+        svc.handler.post(new Runnable() {
+            @Override
+            public void run() {
+                String label = Flasher.formatPillText(sample, Store.getPillFormat(svc));
+                long holdMs = Math.max(Flasher.TOTAL_MS, Store.getPillDuration(svc) * 1000L);
+                svc.flashUntil = SystemClock.elapsedRealtime() + holdMs + 500;
+                svc.flasher.flash(label, Color.rgb(0, 200, 83), Store.getOpacity(svc),
+                        Store.getVibrate(svc), Store.getSound(svc));
+            }
+        });
+        return true;
+    }
+
     @Override
     public void onAccessibilityEvent(AccessibilityEvent e) {
-        if (e == null) return;
+        if (e == null || Store.isStandby(this)) return;
         int type = e.getEventType();
         CharSequence p = e.getPackageName();
         String pkg = p == null ? "" : p.toString();
@@ -223,7 +253,9 @@ public class LoggerService extends AccessibilityService {
                 handler.postDelayed(new Runnable() {
                     @Override
                     public void run() {
-                        capture("follow-up to " + note, true, false);
+                        if (!Store.isStandby(LoggerService.this)) {
+                            capture("follow-up to " + note, true, false);
+                        }
                     }
                 }, 1500);
             }
@@ -244,25 +276,22 @@ public class LoggerService extends AccessibilityService {
     }
 
     private void scheduleCapture() {
-        if (scheduled) return;
+        if (scheduled || Store.isStandby(this)) return;
         scheduled = true;
-        // right after a hich notification the screen is read faster, so a scheduled ride is judged sooner
         long delay = SystemClock.elapsedRealtime() < fastUntil ? 120 : DEBOUNCE_MS;
         handler.postDelayed(new Runnable() {
             @Override
             public void run() {
                 scheduled = false;
-                capture("", false, false);
+                if (!Store.isStandby(LoggerService.this)) {
+                    capture("", false, false);
+                }
             }
         }, delay);
     }
 
-    /**
-     * @param note  text written to the note= line (notifications etc.)
-     * @param force always write the text file and keep the screenshot
-     * @param timed true when triggered by the timer rather than an event
-     */
     private void capture(String note, boolean force, boolean timed) {
+        if (Store.isStandby(this)) return;
         try {
             long now = System.currentTimeMillis();
             final String base = "cap_"
@@ -272,20 +301,27 @@ public class LoggerService extends AccessibilityService {
             boolean any = dumpWindows(body);
             watchedPresent = any;
             String b = body.toString();
+            boolean treeOfferFound = false;
             if (any) {
-                scanOffers(b);
+                treeOfferFound = scanOffers(b);
                 tryPriorityMode(b);
                 tryHichScheduled(b);
                 tryHichOnline(b);
                 tryHichAccept(b);
-                if (blankUber != null) {
+                if (blankUber != null && !treeOfferFound) {
+                    pendingOcrBounds = new Rect(blankUber);
                     trigger("uber offer card with no readable text");
-                    ocrUber(new Rect(blankUber));
+                } else if (blankUber == null) {
+                    pendingOcrBounds = null;
+                    unreadOcrRetries = 0;
                 }
+            } else {
+                pendingOcrBounds = null;
             }
-            boolean changed = !b.equals(lastBody);
 
-            // ---- decide whether this moment is worth keeping screenshots around ----
+            String bodySig = BOUNDS_STRIP.matcher(b).replaceAll("");
+            boolean changed = !bodySig.equals(lastBodySig);
+
             if (force) trigger("notification");
             if (any) {
                 if (prevWinSig != null && !curWinSig.equals(prevWinSig)) {
@@ -297,8 +333,9 @@ public class LoggerService extends AccessibilityService {
                 lastState = st;
             }
 
-            if (force || (any && changed)) {
-                lastBody = b;
+            if (force || (any && (changed || now - lastTxtWriteMs >= 15000))) {
+                lastBodySig = bodySig;
+                lastTxtWriteMs = now;
                 final String text = "time="
                         + new SimpleDateFormat("EEE MMM dd HH:mm:ss zzz yyyy", Locale.US).format(new Date(now))
                         + "\nnote=" + note + "\n\n" + b;
@@ -310,16 +347,21 @@ public class LoggerService extends AccessibilityService {
                 });
             }
 
-            boolean shot = force
+            Rect ocrRect = pendingOcrBounds;
+            boolean wantOcr = ocrRect != null && recognizer != null && !ocrBusy
+                    && (SystemClock.elapsedRealtime() - lastOcr >= OCR_GAP_MS)
+                    && (SystemClock.elapsedRealtime() >= flashUntil);
+            boolean shot = force || wantOcr
                     || (timed && (Store.isAlways(this) || any))
                     || (!timed && any && changed);
-            if (shot) shoot(base, force);
+            if (shot) {
+                shoot(base, force || wantOcr, wantOcr ? ocrRect : null);
+            }
         } catch (Throwable t) {
             logLine("capture error: " + t);
         }
     }
 
-    /** Bitmask of which offer / ride-flow markers are currently on screen. */
     private static int stateOf(String body) {
         int st = ACCEPT.matcher(body).find() ? 1 : 0;
         for (int i = 0; i < MARKERS.length; i++) {
@@ -330,10 +372,14 @@ public class LoggerService extends AccessibilityService {
 
     private boolean dumpWindows(StringBuilder sb) {
         boolean any = false;
+        boolean realWatchedWindow = false;
         StringBuilder others = new StringBuilder();
         StringBuilder wsig = new StringBuilder();
         int noroot = 0;
         blankUber = null;
+        DisplayMetrics dm = getResources().getDisplayMetrics();
+        int screenW = dm.widthPixels;
+        int screenH = dm.heightPixels;
 
         List<AccessibilityWindowInfo> wins = null;
         try {
@@ -363,17 +409,18 @@ public class LoggerService extends AccessibilityService {
                             .append(" layer=").append(w.getLayer()).append(" ===\n");
                     int[] count = new int[]{0};
                     StringBuilder seg = new StringBuilder();
-                    dumpNode(root, 0, seg, count);
-                    sb.append(seg);
-                    if (pkg.equals(UBER) && w.getLayer() >= 1 && count[0] > 1
-                            && seg.indexOf("text=\"") < 0 && seg.indexOf("desc=\"") < 0
-                            && seg.indexOf("RecyclerView") >= 0) {
-                        Rect rb = new Rect();
-                        root.getBoundsInScreen(rb);
-                        if (rb.height() > 400) blankUber = rb;
+                    Rect[] blankSubtree = new Rect[]{null};
+                    dumpNode(root, 0, seg, count, pkg.equals(UBER), screenW, screenH, blankSubtree);
+                    String segStr = seg.toString();
+                    sb.append(segStr);
+
+                    if (pkg.equals(UBER)) {
+                        detectBlankUber(root, w.getLayer(), count[0], segStr, blankSubtree[0], screenW, screenH);
                     }
-                    // tiny windows (the floating bubble) don't count as a real window
-                    if (count[0] > 3) wsig.append(pkg).append(":L").append(w.getLayer()).append(' ');
+                    if (count[0] > 3) {
+                        realWatchedWindow = true;
+                        wsig.append(pkg).append(":L").append(w.getLayer()).append(' ');
+                    }
                 } else {
                     others.append(pkg).append(":L").append(w.getLayer())
                             .append(":t").append(w.getType()).append("  ");
@@ -381,7 +428,7 @@ public class LoggerService extends AccessibilityService {
             }
         }
 
-        if (!any) {
+        if (!realWatchedWindow) {
             try {
                 AccessibilityNodeInfo r = getRootInActiveWindow();
                 if (r != null) {
@@ -391,7 +438,14 @@ public class LoggerService extends AccessibilityService {
                         any = true;
                         sb.append("=== WINDOW ").append(pkg).append(" layer=-1 ===\n");
                         int[] count = new int[]{0};
-                        dumpNode(r, 0, sb, count);
+                        StringBuilder seg = new StringBuilder();
+                        Rect[] blankSubtree = new Rect[]{null};
+                        dumpNode(r, 0, seg, count, pkg.equals(UBER), screenW, screenH, blankSubtree);
+                        String segStr = seg.toString();
+                        sb.append(segStr);
+                        if (pkg.equals(UBER)) {
+                            detectBlankUber(r, -1, count[0], segStr, blankSubtree[0], screenW, screenH);
+                        }
                         if (count[0] > 3) wsig.append(pkg).append(":L-1 ");
                     }
                 }
@@ -407,8 +461,39 @@ public class LoggerService extends AccessibilityService {
         return any;
     }
 
-    private void dumpNode(AccessibilityNodeInfo n, int depth, StringBuilder sb, int[] count) {
-        if (n == null || count[0] >= MAX_NODES) return;
+    private void detectBlankUber(AccessibilityNodeInfo root, int layer, int nodeCount,
+                                 String segStr, Rect blankSubtree, int screenW, int screenH) {
+        if (blankUber != null) return;
+        boolean hasDollar = HAS_DOLLAR.matcher(segStr).find();
+
+        if (layer >= 1 && nodeCount > 1 && !hasDollar
+                && (segStr.contains("RecyclerView") || segStr.contains("ViewGroup") || segStr.contains("FrameLayout"))) {
+            Rect rb = new Rect();
+            root.getBoundsInScreen(rb);
+            if (rb.height() > 320) {
+                blankUber = rb;
+                return;
+            }
+        }
+
+        if (blankSubtree != null && !hasDollar) {
+            blankUber = blankSubtree;
+            return;
+        }
+
+        boolean hasOfferMarker = segStr.contains("text=\"Decline\"")
+                || segStr.contains("request matching")
+                || segStr.contains("xclusive")
+                || segStr.contains("Trip Radar")
+                || segStr.contains("text=\"Match\"");
+        if (hasOfferMarker && !segStr.contains(" trip\"")) {
+            blankUber = new Rect(0, Math.round(screenH * 0.22f), screenW, screenH);
+        }
+    }
+
+    private int[] dumpNode(AccessibilityNodeInfo n, int depth, StringBuilder sb, int[] count,
+                           boolean isUber, int screenW, int screenH, Rect[] blankSubtree) {
+        if (n == null || count[0] >= MAX_NODES) return new int[]{0, 0};
         count[0]++;
         for (int i = 0; i < depth; i++) sb.append("  ");
 
@@ -421,9 +506,16 @@ public class LoggerService extends AccessibilityService {
         String id = n.getViewIdResourceName();
         if (id != null) sb.append(" id=").append(id);
         CharSequence d = n.getContentDescription();
-        if (d != null && d.length() > 0) sb.append(" desc=\"").append(oneLine(d)).append('"');
+        boolean hasTextOrDesc = false;
+        if (d != null && d.length() > 0) {
+            sb.append(" desc=\"").append(oneLine(d)).append('"');
+            hasTextOrDesc = true;
+        }
         CharSequence t = n.getText();
-        if (t != null && t.length() > 0) sb.append(" text=\"").append(oneLine(t)).append('"');
+        if (t != null && t.length() > 0) {
+            sb.append(" text=\"").append(oneLine(t)).append('"');
+            hasTextOrDesc = true;
+        }
 
         Rect r = new Rect();
         n.getBoundsInScreen(r);
@@ -436,92 +528,74 @@ public class LoggerService extends AccessibilityService {
         if (!n.isImportantForAccessibility()) sb.append(" notimportant");
         sb.append('\n');
 
+        int subNodes = 1;
+        int subTextNodes = hasTextOrDesc ? 1 : 0;
         int c = n.getChildCount();
         for (int i = 0; i < c; i++) {
             AccessibilityNodeInfo ch = n.getChild(i);
-            if (ch != null) dumpNode(ch, depth + 1, sb, count);
+            if (ch != null) {
+                int[] childStats = dumpNode(ch, depth + 1, sb, count, isUber, screenW, screenH, blankSubtree);
+                subNodes += childStats[0];
+                subTextNodes += childStats[1];
+            }
         }
+
+        if (isUber && blankSubtree[0] == null && "RecyclerView".equals(cls)
+                && n.isVisibleToUser() && subNodes >= 2 && subTextNodes == 0
+                && r.height() > 320 && r.width() > screenW * 0.70 && r.bottom > screenH * 0.45) {
+            blankSubtree[0] = new Rect(r);
+        }
+        return new int[]{subNodes, subTextNodes};
     }
 
     private static String oneLine(CharSequence s) {
         return s.toString().replace('\n', ' ').replace('\r', ' ');
     }
 
-    // ---------------------------------------------------------------- v3: offers
-
-    /** Offers whose text is readable in the accessibility tree (Lyft, hich, Uber reservations). */
-    private void scanOffers(String body) {
+    private boolean scanOffers(String body) {
         if (!body.contains("est. rate for this ride") && !body.contains("desc=\"ACCEPT\"")
-                && !body.contains("Accept \u2022")) return;
+                && !body.contains("Accept •") && !body.contains("eservation request")) {
+            return false;
+        }
+        boolean completeUberFound = false;
         List<Offers.Offer> list = Offers.fromTree(body, Store.getMinRate(this),
                 Store.getHichMiles(this), Store.getHichScheduled(this));
-        for (Offers.Offer o : list) handleOffer(o);
+        for (Offers.Offer o : list) {
+            if ("uber".equals(o.app) && !"UNREAD".equals(o.verdict)) {
+                completeUberFound = true;
+            }
+            handleOffer(o);
+        }
+        return completeUberFound;
     }
 
-    /** Uber live offers have no readable text, so read the offer card from a screenshot instead. */
-    private void ocrUber(final Rect bounds) {
-        long now = SystemClock.elapsedRealtime();
-        if (recognizer == null || ocrBusy || now - lastOcr < OCR_GAP_MS || now < flashUntil) return;
-        ocrBusy = true;
-        lastOcr = now;
-        try {
-            takeScreenshot(Display.DEFAULT_DISPLAY, io,
-                    new AccessibilityService.TakeScreenshotCallback() {
-                        @Override
-                        public void onSuccess(AccessibilityService.ScreenshotResult result) {
-                            try {
-                                Bitmap crop = cropShot(result, bounds);
-                                if (crop == null) {
-                                    ocrBusy = false;
-                                    return;
-                                }
-                                readCrop(crop);
-                            } catch (Throwable t) {
-                                ocrBusy = false;
-                                logLine("ocr error: " + t);
-                            }
-                        }
-
-                        @Override
-                        public void onFailure(int errorCode) {
-                            ocrBusy = false;
-                            logLine("ocr screenshot failed, code " + errorCode);
-                        }
-                    });
-        } catch (Throwable t) {
-            ocrBusy = false;
-            logLine("ocr error: " + t);
-        }
-    }
-
-    private Bitmap cropShot(AccessibilityService.ScreenshotResult result, Rect bounds) {
-        HardwareBuffer hb = result.getHardwareBuffer();
-        Bitmap hw = Bitmap.wrapHardwareBuffer(hb, result.getColorSpace());
-        if (hw == null) {
-            hb.close();
-            return null;
-        }
-        Bitmap sw = hw.copy(Bitmap.Config.ARGB_8888, false);
-        hw.recycle();
-        hb.close();
-        if (sw == null) return null;
-        int top = Math.max(0, bounds.top - 80);
+    private Bitmap cropBitmapForOcr(Bitmap sw, Rect bounds) {
+        if (sw == null || bounds == null) return null;
+        int top = Math.max(0, bounds.top - 40);
         int bottom = Math.min(sw.getHeight(), bounds.bottom + 40);
-        if (bottom - top < 200) {
-            sw.recycle();
-            return null;
-        }
-        Bitmap crop = Bitmap.createBitmap(sw, 0, top, sw.getWidth(), bottom - top);
-        if (crop != sw) sw.recycle();
-        return crop;
+        if (bottom - top < 200) return null;
+        return Bitmap.createBitmap(sw, 0, top, sw.getWidth(), bottom - top);
     }
 
     private void readCrop(final Bitmap crop) {
+        Store.incDiag(this, Store.KEY_DIAG_OCR_RUNS);
         recognizer.process(InputImage.fromBitmap(crop, 0))
                 .addOnSuccessListener(text -> {
                     crop.recycle();
                     ocrBusy = false;
-                    handleOffer(Offers.fromUberOcr(text.getText(), Store.getMinRate(LoggerService.this)));
+                    Offers.Offer o = Offers.fromUberOcr(text.getText(), Store.getMinRate(LoggerService.this));
+                    if ("UNREAD".equals(o.verdict) && unreadOcrRetries < 2 && pendingOcrBounds != null) {
+                        unreadOcrRetries++;
+                        Store.incDiag(LoggerService.this, Store.KEY_DIAG_OCR_RETRIES);
+                        scheduleOcrRetry(500);
+                        return;
+                    }
+                    if ("UNREAD".equals(o.verdict)) {
+                        Store.incDiag(LoggerService.this, Store.KEY_DIAG_OCR_UNREAD);
+                    }
+                    unreadOcrRetries = 0;
+                    pendingOcrBounds = null;
+                    handleOffer(o);
                 })
                 .addOnFailureListener(e -> {
                     crop.recycle();
@@ -530,12 +604,18 @@ public class LoggerService extends AccessibilityService {
                 });
     }
 
-    /** Main thread: log an offer once, and in Alert mode pulse the screen when it is good. */
+    private void scheduleOcrRetry(long delayMs) {
+        if (ocrRetryScheduled) return;
+        ocrRetryScheduled = true;
+        handler.postDelayed(ocrRetryRunnable, Math.max(150, delayMs));
+    }
+
     private void handleOffer(Offers.Offer o) {
         long now = SystemClock.elapsedRealtime();
         String key = o.key();
         Long last = offerSeen.get(key);
-        if (last != null && now - last < OFFER_REPEAT_MS) return;
+        long repeatWindow = "UNREAD".equals(o.verdict) ? 4000 : OFFER_REPEAT_MS;
+        if (last != null && now - last < repeatWindow) return;
         offerSeen.put(key, now);
         if (offerSeen.size() > 200) offerSeen.clear();
 
@@ -544,8 +624,8 @@ public class LoggerService extends AccessibilityService {
             o.detail = o.detail + " (quiet hours)";
         }
         final int mode = Store.getMode(this);
-        String label = labelFor(o);
-        logLine("OFFER " + label + " " + o.kind + " " + o.verdict + " (" + o.source + ") " + o.detail);
+        String logLabel = labelFor(o);
+        logLine("OFFER " + logLabel + " " + o.kind + " " + o.verdict + " (" + o.source + ") " + o.detail);
 
         try {
             final JSONObject j = new JSONObject();
@@ -570,28 +650,18 @@ public class LoggerService extends AccessibilityService {
         }
 
         if (mode == Store.MODE_ALERT && "GOOD".equals(o.verdict) && flasher != null) {
-            flashUntil = now + Flasher.TOTAL_MS + 1500;
-            flasher.flash(label, Color.rgb(0, 200, 83), Store.getOpacity(this),
+            String pillText = Flasher.formatPillText(o, Store.getPillFormat(this));
+            long holdMs = Math.max(Flasher.TOTAL_MS, Store.getPillDuration(this) * 1000L);
+            flashUntil = now + holdMs + 1200;
+            flasher.flash(pillText, Color.rgb(0, 200, 83), Store.getOpacity(this),
                     Store.getVibrate(this), Store.getSound(this));
         }
     }
 
     static String labelFor(Offers.Offer o) {
-        String app = o.app.equals("uber") ? "Uber" : o.app.equals("lyft") ? "Lyft" : "hich";
-        StringBuilder sb = new StringBuilder(app);
-        if (o.price > 0) sb.append(" $").append(String.format(Locale.US, "%.2f", o.price));
-        if (o.rate >= 0) sb.append(" \u00b7 $").append(Math.round(o.rate)).append("/hr");
-        return sb.toString();
+        return Flasher.formatPillText(o, Store.FORMAT_STANDARD);
     }
 
-    // ---------------------------------------------------------------- v3.1: Lyft Priority Mode
-
-    /**
-     * Lyft shows a "Turn on" pill next to "Priority Mode" only while Priority Mode is available and
-     * off. Once it is on, the pill becomes the plain, untappable text "On". So the rule is: find a
-     * visible, enabled node whose text is exactly "Turn on" inside the Priority Mode row of the Lyft
-     * driver app, and click it. Nothing else is ever tapped. Never while an offer card is showing.
-     */
     private void tryPriorityMode(String body) {
         if (!Store.getAutoPriority(this)) return;
         if (!body.contains("Turn on")) return;
@@ -645,7 +715,6 @@ public class LoggerService extends AccessibilityService {
         }
     }
 
-    /** True when "Priority Mode" text sits in the same small group as the button (up to 3 levels up). */
     private static boolean inPriorityRow(AccessibilityNodeInfo n) {
         AccessibilityNodeInfo p = n.getParent();
         for (int i = 0; i < 3 && p != null; i++) {
@@ -656,7 +725,6 @@ public class LoggerService extends AccessibilityService {
         return false;
     }
 
-    /** The node itself or the nearest clickable parent (up to 4 levels), or null. */
     private static AccessibilityNodeInfo clickableOf(AccessibilityNodeInfo n) {
         AccessibilityNodeInfo c = n;
         for (int i = 0; i < 5 && c != null; i++) {
@@ -672,16 +740,6 @@ public class LoggerService extends AccessibilityService {
         logLine("PRIORITY MODE: " + msg);
     }
 
-    // ---------------------------------------------------------------- v3.2: hich scheduled rides
-
-    /**
-     * On the hich home screen a car-and-clock icon at the top right carries a red badge with the
-     * number of waiting scheduled rides (0 when none). When that badge shows 1 or more, tap the
-     * icon once so the Schedule Bookings screen (OFFERS tab) opens. The badge is found by its
-     * number and position, so no button id is needed. It is not tapped again for the same number
-     * within 10 minutes, so backing out of the screen does not reopen it. Never while a live offer
-     * card is on screen.
-     */
     private void tryHichScheduled(String body) {
         if (!Store.getAutoSched(this)) return;
         if (!body.contains(HICH)) return;
@@ -734,7 +792,6 @@ public class LoggerService extends AccessibilityService {
         }
     }
 
-    /** Collects visible 1 or 2 digit numbers in the top-right of the screen (the badge). */
     private static void collectBadges(AccessibilityNodeInfo n, int w, int h,
                                       List<AccessibilityNodeInfo> out, int[] budget) {
         if (n == null || budget[0]++ > 800) return;
@@ -751,15 +808,6 @@ public class LoggerService extends AccessibilityService {
         for (int i = 0; i < c; i++) collectBadges(n.getChild(i), w, h, out, budget);
     }
 
-    // ---------------------------------------------------------------- v3.3: hich go online
-
-    /**
-     * Scheduled rides can only be accepted while hich is online. When the hich home screen is open,
-     * says "You're offline" and shows its big "GO" button, tap GO once. Only an enabled button whose
-     * text is exactly "GO" is tapped. The offline screen has to stay put for 1.5 seconds first (so a
-     * screen that is still loading is left alone), and it will not tap again for 10 minutes, so
-     * going offline on purpose right afterwards sticks. Never while a live offer card is showing.
-     */
     private void tryHichOnline(String body) {
         if (!Store.getAutoOnline(this) || !body.contains(HICH) || !OFFLINE.matcher(body).find()
                 || ACCEPT.matcher(body).find() || body.contains("desc=\"ACCEPT\"")
@@ -816,9 +864,6 @@ public class LoggerService extends AccessibilityService {
         }
     }
 
-    // ---------------------------------------------------------------- v3.4: hich scheduled rides
-
-    /** What is known about one hich scheduled ride while its Trip Details screen is open. */
     private static final class HichRide {
         final long firstSeen;
         final Rules.Scheduled data = new Rules.Scheduled();
@@ -833,12 +878,6 @@ public class LoggerService extends AccessibilityService {
         }
     }
 
-    /**
-     * A hich notification arrived. Fire its own tap action straight away, so the ride screen opens
-     * about as fast as hich can draw it, instead of waiting for a person to tap the notification.
-     * The notification text is empty, so every hich notification is opened. The result is logged,
-     * because Android may refuse to open an app from the background on some phones.
-     */
     private void openHichNotification(AccessibilityEvent e) {
         if (!Store.getAutoOpen(this)) return;
         long now = SystemClock.elapsedRealtime();
@@ -870,13 +909,6 @@ public class LoggerService extends AccessibilityService {
         }
     }
 
-    /**
-     * On a hich Trip Details screen for a ride whose status is Scheduled and that still has an
-     * ACCEPT button: read the trip amount, pickup time and minutes, decide once with Rules, log the
-     * decision, and tap ACCEPT if the ride qualifies. A ride is never judged twice; if the ACCEPT
-     * button is still there 2.5 s after a tap, it is tapped once more (two taps at most).
-     * Fields are merged across readings, because scrolling the screen hides some of them.
-     */
     private void tryHichAccept(String body) {
         if (!Store.getAutoAccept(this) || !body.contains(HICH)) return;
         for (String seg : Rules.segmentsFor(body, HICH)) {
@@ -935,7 +967,6 @@ public class LoggerService extends AccessibilityService {
         handleOffer(o);
     }
 
-    /** Taps the exact ACCEPT button of the hich Trip Details screen, then keeps a few screenshots. */
     private void tapHichAccept(HichRide r) {
         List<AccessibilityWindowInfo> wins;
         try {
@@ -982,22 +1013,20 @@ public class LoggerService extends AccessibilityService {
         priorityNote(now, "hich ACCEPT: could not find the ACCEPT button to tap");
     }
 
-    /** Forced captures shortly after an accept tap, so the first real accept is on record. */
     private void afterTapShots() {
         int[] delays = {500, 1800, 4000};
         for (int i = 0; i < delays.length; i++) {
             handler.postDelayed(new Runnable() {
                 @Override
                 public void run() {
-                    capture("after hich accept tap", true, false);
+                    if (!Store.isStandby(LoggerService.this)) {
+                        capture("after hich accept tap", true, false);
+                    }
                 }
             }, delays[i]);
         }
     }
 
-    // ---------------------------------------------------------------- keep / discard logic
-
-    /** Called from the main thread: marks "now" as interesting. */
     private void trigger(final String why) {
         final long t = System.currentTimeMillis();
         io.execute(new Runnable() {
@@ -1008,7 +1037,6 @@ public class LoggerService extends AccessibilityService {
         });
     }
 
-    /** io thread: keep the recent past, and keep new shots for a while. */
     private void promote(long t, String why) {
         keepUntil = Math.max(keepUntil, t + POST_ROLL_MS);
         int moved = 0;
@@ -1026,7 +1054,6 @@ public class LoggerService extends AccessibilityService {
         }
     }
 
-    /** io thread: throw away pending shots that are too old to matter. */
     private void prunePending() {
         File[] files = Store.pendingDir(this).listFiles();
         if (files == null) return;
@@ -1036,47 +1063,87 @@ public class LoggerService extends AccessibilityService {
         }
     }
 
-    // ---------------------------------------------------------------- screenshots
-
-    private void shoot(final String base, final boolean force) {
+    private void shoot(final String base, final boolean force, final Rect ocrBounds) {
+        if (Store.isStandby(this)) return;
         long nowMs = SystemClock.elapsedRealtime();
-        if (nowMs - lastShot < MIN_SHOT_GAP_MS) return;
+        long elapsed = nowMs - lastShot;
+        if (elapsed < MIN_SHOT_GAP_MS) {
+            if (ocrBounds != null) {
+                Store.incDiag(this, Store.KEY_DIAG_OCR_RETRIES);
+                scheduleOcrRetry(MIN_SHOT_GAP_MS - elapsed + 60);
+            }
+            return;
+        }
         lastShot = nowMs;
+        if (ocrBounds != null) {
+            ocrBusy = true;
+            lastOcr = nowMs;
+        }
         try {
             takeScreenshot(Display.DEFAULT_DISPLAY, io,
                     new AccessibilityService.TakeScreenshotCallback() {
                         @Override
                         public void onSuccess(AccessibilityService.ScreenshotResult result) {
                             try {
-                                saveShot(result, base, force);
+                                saveShot(result, base, force, ocrBounds);
                             } catch (Throwable t) {
+                                if (ocrBounds != null) ocrBusy = false;
                                 logLine("screenshot save error: " + t);
                             }
                         }
 
                         @Override
                         public void onFailure(int errorCode) {
-                            logLine("screenshot failed, code " + errorCode);
+                            Store.incDiag(LoggerService.this, Store.KEY_DIAG_SHOT_FAILS);
+                            if (ocrBounds != null) {
+                                ocrBusy = false;
+                                lastOcr = 0;
+                                Store.incDiag(LoggerService.this, Store.KEY_DIAG_OCR_RETRIES);
+                                logLine("ocr screenshot failed, code " + errorCode + " (scheduling retry)");
+                                handler.post(() -> scheduleOcrRetry(400));
+                            } else {
+                                logLine("screenshot failed, code " + errorCode);
+                            }
                         }
                     });
         } catch (Throwable t) {
+            if (ocrBounds != null) {
+                ocrBusy = false;
+                lastOcr = 0;
+            }
             logLine("screenshot error: " + t.getMessage());
         }
     }
 
-    // runs on the io thread
-    private void saveShot(AccessibilityService.ScreenshotResult result, String base, boolean force) throws Exception {
+    private void saveShot(AccessibilityService.ScreenshotResult result, String base,
+                          boolean force, Rect ocrBounds) throws Exception {
         HardwareBuffer hb = result.getHardwareBuffer();
         Bitmap hw = Bitmap.wrapHardwareBuffer(hb, result.getColorSpace());
         if (hw == null) {
             hb.close();
+            if (ocrBounds != null) ocrBusy = false;
             logLine("screenshot: could not read the screen buffer");
             return;
         }
         Bitmap sw = hw.copy(Bitmap.Config.ARGB_8888, false);
         hw.recycle();
         hb.close();
-        if (sw == null) return;
+        if (sw == null) {
+            if (ocrBounds != null) ocrBusy = false;
+            return;
+        }
+
+        Rect activeOcrRect = ocrBounds != null ? ocrBounds : pendingOcrBounds;
+        boolean runOcrNow = activeOcrRect != null && recognizer != null && (ocrBounds != null || !ocrBusy);
+        Bitmap ocrCrop = null;
+        if (runOcrNow) {
+            ocrBusy = true;
+            lastOcr = SystemClock.elapsedRealtime();
+            ocrCrop = cropBitmapForOcr(sw, activeOcrRect);
+            if (ocrCrop == null) {
+                ocrBusy = false;
+            }
+        }
 
         int h = Math.max(1, Math.round(sw.getHeight() * (SHOT_WIDTH / (float) sw.getWidth())));
         Bitmap scaled = Bitmap.createScaledBitmap(sw, SHOT_WIDTH, h, true);
@@ -1085,13 +1152,22 @@ public class LoggerService extends AccessibilityService {
         int[] sig = signature(scaled);
         long sum = 0;
         for (int v : sig) sum += v;
-        if (sum / (double) sig.length < 3.0) {
+        boolean isBlank = (sum / (double) sig.length < 3.0);
+        if (isBlank) {
             logLine("screenshot looks BLANK (secure screen?) at " + base);
+            if (ocrCrop != null) {
+                ocrCrop.recycle();
+                ocrCrop = null;
+                ocrBusy = false;
+            }
+        }
+
+        if (ocrCrop != null) {
+            readCrop(ocrCrop);
         }
 
         long now = System.currentTimeMillis();
 
-        // 1. duplicates are never stored
         boolean same = lastSig != null && meanDiff(sig, lastSig) < DUPLICATE_DIFF;
         if (same && !force) {
             prevSig = sig;
@@ -1099,7 +1175,6 @@ public class LoggerService extends AccessibilityService {
             return;
         }
 
-        // 2. a big change on screen while a watched app is present counts as "something happened"
         if (prevSig != null && watchedPresent
                 && meanDiff(sig, prevSig) >= BIG_CHANGE_DIFF
                 && now - lastVisualTrigger > VISUAL_COOLDOWN_MS) {
@@ -1109,7 +1184,6 @@ public class LoggerService extends AccessibilityService {
         prevSig = sig;
         lastSig = sig;
 
-        // 3. keep now, or park in the pending folder where it expires unless something happens
         boolean keepNow = force || now < keepUntil;
         File out = new File(keepNow ? Store.dir(this) : Store.pendingDir(this), base + ".jpg");
         FileOutputStream os = new FileOutputStream(out);
@@ -1143,9 +1217,6 @@ public class LoggerService extends AccessibilityService {
         return d / (double) a.length;
     }
 
-    // ---------------------------------------------------------------- files
-
-    // runs on the io thread
     private void writeFile(String name, byte[] data) {
         try {
             FileOutputStream os = new FileOutputStream(new File(Store.dir(this), name));

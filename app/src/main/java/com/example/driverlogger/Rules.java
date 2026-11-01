@@ -7,25 +7,22 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * v3.4: the accept rules for hich scheduled rides, and the quiet-hours window.
- * Pure Java (no Android classes) so it can be tested on a computer against real captured screens.
+ * v3.5: accept rules for hich scheduled rides and quiet-hours window.
  */
 final class Rules {
     private Rules() {}
 
-    /** What the hich Trip Details screen says about one scheduled ride. -1 / "" means not read. */
     static final class Scheduled {
         String rideId = "";
         String status = "";
-        double price = -1;          // "Trip amount": what the driver gets after fees
-        double tripMin = -1;        // Est Duration
-        double pickupMin = -1;      // "13 mins (8.7 mi) away"
-        int pickupMinuteOfDay = -1; // from "Pickup Time 07:30 AM"
+        double price = -1;
+        double tripMin = -1;
+        double pickupMin = -1;
+        int pickupMinuteOfDay = -1;
         String pickupClock = "";
-        String dateText = "";       // "Sat, Oct 31", for the log only
+        String dateText = "";
         boolean hasAccept = false;
 
-        /** Fill in anything this object is missing from a newer reading of the same ride. */
         void merge(Scheduled n) {
             if (!n.rideId.isEmpty()) rideId = n.rideId;
             if (!n.status.isEmpty()) status = n.status;
@@ -43,22 +40,21 @@ final class Rules {
 
     static final class Decision {
         boolean accept;
-        String verdict = "UNREAD"; // GOOD | SKIP | QUIET | UNREAD | WAIT
+        String verdict = "UNREAD";
         String reason = "";
         double rate = -1;
     }
 
-    private static final Pattern RIDE_ID = Pattern.compile("Ride ID #(\\d+)");
-    private static final Pattern STATUS = Pattern.compile("Trip Status (\\w+)");
-    private static final Pattern AMOUNT = Pattern.compile("Trip amount\\s+\\$(\\d+(?:\\.\\d{1,2})?)");
+    private static final Pattern RIDE_ID = Pattern.compile("Ride ID #(\d+)");
+    private static final Pattern STATUS = Pattern.compile("Trip Status (\w+)");
+    private static final Pattern AMOUNT = Pattern.compile("Trip amount\s+\$(\d+(?:\.\d{1,2})?)");
     private static final Pattern DURATION = Pattern.compile("Est Duration (.*?) Pickup Time");
-    private static final Pattern CLOCK = Pattern.compile("Pickup Time (\\d{1,2}):(\\d{2})\\s*([AaPp][Mm])");
+    private static final Pattern CLOCK = Pattern.compile("Pickup Time (\d{1,2}):(\d{2})\s*([AaPp][Mm])");
     private static final Pattern AWAY =
-            Pattern.compile("(\\d+) mins? \\((\\d+(?:\\.\\d+)?) mi\\) away");
-    private static final Pattern DATE = Pattern.compile("Date (\\w{3}, \\w{3} \\d{1,2})");
-    private static final Pattern WIN = Pattern.compile("=== WINDOW (\\S+) layer=(-?\\d+) ===\\n");
+            Pattern.compile("(\d+) mins? \((\d+(?:\.\d+)?) mi\) away");
+    private static final Pattern DATE = Pattern.compile("Date (\w{3}, \w{3} \d{1,2})");
+    private static final Pattern WIN = Pattern.compile("=== WINDOW (\S+) layer=(-?\d+) ===\n");
 
-    /** The text of every window of the given app in an accessibility dump. */
     static List<String> segmentsFor(String body, String pkg) {
         List<String> out = new ArrayList<>();
         Matcher m = WIN.matcher(body);
@@ -78,10 +74,6 @@ final class Rules {
         return out;
     }
 
-    /**
-     * Reads a hich Trip Details screen. Returns null when this is not that screen. The caller still
-     * has to check status and hasAccept before doing anything.
-     */
     static Scheduled parseHichTripDetails(String seg) {
         if (!seg.contains("desc=\"Trip Details\"")) return null;
         Scheduled s = new Scheduled();
@@ -108,16 +100,15 @@ final class Rules {
         return s;
     }
 
-    /** "18 min" -> 18, "1 hr 5 min" -> 65, "2 hr" -> 120. Returns -1 when nothing is readable. */
     static double parseDuration(String t) {
         double total = 0;
         boolean found = false;
-        Matcher h = Pattern.compile("(\\d+)\\s*h").matcher(t);
+        Matcher h = Pattern.compile("(\d+)\s*h").matcher(t);
         if (h.find()) {
             total += 60 * Double.parseDouble(h.group(1));
             found = true;
         }
-        Matcher mi = Pattern.compile("(\\d+)\\s*m").matcher(t);
+        Matcher mi = Pattern.compile("(\d+)\s*m").matcher(t);
         if (mi.find()) {
             total += Double.parseDouble(mi.group(1));
             found = true;
@@ -125,14 +116,6 @@ final class Rules {
         return found ? total : -1;
     }
 
-    /**
-     * The rule: accept when the trip amount is at least minAmount OR the hourly pay is at least
-     * minRate, unless the pickup time is inside the quiet window. Hourly pay is the trip amount
-     * divided by the drive to the pickup plus the trip itself.
-     *
-     * @param waitedMs how long this ride has been on screen. If the drive-to-pickup minutes are not
-     *                 readable yet and the amount alone does not qualify, wait briefly for them.
-     */
     static Decision decide(Scheduled s, double minAmount, double minRate,
                            boolean quietOn, int quietStart, int quietEnd, long waitedMs) {
         Decision d = new Decision();
@@ -154,7 +137,7 @@ final class Rules {
         boolean hourly = d.rate >= 0 && d.rate >= minRate;
         if (!flat && d.rate < 0 && waitedMs < 1500) {
             d.verdict = "WAIT";
-            d.reason = "waiting for the drive-to-pickup minutes";
+            d.reason = "waiting for drive-to-pickup minutes";
             return d;
         }
         d.accept = flat || hourly;
@@ -162,23 +145,20 @@ final class Rules {
         String r = d.rate >= 0 ? String.format(Locale.US, "$%.0f/hr", d.rate) : "$/hr unknown";
         if (flat && hourly) d.reason = "amount and hourly both qualify (" + r + ")";
         else if (flat) d.reason = "amount qualifies (at least $" + trim(minAmount) + "), " + r;
-        else if (hourly) d.reason = "hourly qualifies (" + r + " is at least $" + trim(minRate)
-                + "), amount is under $" + trim(minAmount);
+        else if (hourly) d.reason = "hourly qualifies (" + r + " is at least $" + trim(minRate) + ")";
         else d.reason = "amount under $" + trim(minAmount) + " and " + r + " under $" + trim(minRate);
         return d;
     }
 
-    /** True when the minute of the day is inside [start, end). The window may wrap past midnight. */
     static boolean inQuiet(int minuteOfDay, boolean on, int start, int end) {
         if (!on || start == end || minuteOfDay < 0) return false;
         if (start < end) return minuteOfDay >= start && minuteOfDay < end;
         return minuteOfDay >= start || minuteOfDay < end;
     }
 
-    /** "23:00", "11:00 PM", "7:30", "7:30am" -> minutes after midnight, or -1 if unreadable. */
     static int parseClock(String s) {
         if (s == null) return -1;
-        Matcher m = Pattern.compile("^\\s*(\\d{1,2})(?:[:.](\\d{2}))?\\s*([AaPp][Mm])?\\s*$").matcher(s);
+        Matcher m = Pattern.compile("^\s*(\d{1,2})(?:[:.](\d{2}))?\s*([AaPp][Mm])?\s*$").matcher(s);
         if (!m.find()) return -1;
         int h = Integer.parseInt(m.group(1));
         int min = m.group(2) == null ? 0 : Integer.parseInt(m.group(2));

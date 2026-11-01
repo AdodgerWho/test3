@@ -5,21 +5,17 @@ import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-/**
- * Turns screen text into offers. Pure Java (no Android classes) so it can be tested on a computer.
- * Reads either the accessibility-tree dump (Lyft, hich, Uber reservations) or OCR text (Uber live offers).
- */
 final class Offers {
     private Offers() {}
 
     static final class Offer {
-        String app;        // uber | lyft | hich
-        String kind;       // live | reservation | scheduled
+        String app;
+        String kind;
         double price = -1;
-        double rate = -1;  // dollars per hour (from the app, or computed)
+        double rate = -1;
         double pickupMin = -1, pickupMi = -1, tripMin = -1, tripMi = -1;
-        String verdict = "UNREAD"; // GOOD | SKIP | UNREAD
-        String source = "tree";    // tree | ocr
+        String verdict = "UNREAD";
+        String source = "tree";
         String detail = "";
         String raw = "";
 
@@ -28,31 +24,36 @@ final class Offers {
         }
     }
 
-    private static final Pattern WIN = Pattern.compile("=== WINDOW (\\S+) layer=(-?\\d+) ===\\n");
-
+    private static final Pattern WIN = Pattern.compile("=== WINDOW (\S+) layer=(-?\d+) ===\n");
     private static final Pattern LYFT_RATE =
-            Pattern.compile("text=\"\\$(\\d+(?:\\.\\d+)?)/hr est\\. rate for this ride\"");
-    private static final Pattern MONEY_TEXT = Pattern.compile("text=\"\\$(\\d+\\.\\d\\d)\"");
+            Pattern.compile("text=\"\$(\d+(?:\.\d+)?)/hr est\. rate for this ride\"");
+    private static final Pattern MONEY_TEXT = Pattern.compile("text=\"\$(\d+\.\d\d)\"");
     private static final Pattern LYFT_LEG =
-            Pattern.compile("text=\"(\\d+) min \u2022 (\\d+(?:\\.\\d+)?) mi\"");
+            Pattern.compile("text=\"(\d+) min • (\d+(?:\.\d+)?) mi\"");
 
-    private static final Pattern HICH_PRICE = Pattern.compile("desc=\"\\$(\\d+\\.\\d\\d)\"");
+    private static final Pattern HICH_PRICE = Pattern.compile("desc=\"\$(\d+\.\d\d)\"");
     private static final Pattern HICH_AWAY =
-            Pattern.compile("desc=\"(\\d+) mins? \\((\\d+(?:\\.\\d+)?) mi\\) away\"");
+            Pattern.compile("desc=\"(\d+) mins? \((\d+(?:\.\d+)?) mi\) away\"");
     private static final Pattern HICH_TRIP =
-            Pattern.compile("desc=\"(\\d+) mins? \\((\\d+(?:\\.\\d+)?) mi\\) trip\"");
+            Pattern.compile("desc=\"(\d+) mins? \((\d+(?:\.\d+)?) mi\) trip\"");
 
-    private static final Pattern UBER_RES_BTN = Pattern.compile("text=\"Accept \u2022 \\$(\\d+\\.\\d\\d)\"");
+    private static final Pattern UBER_RES_BTN = Pattern.compile("text=\"Accept • \$(\d+\.\d\d)\"");
+    private static final Pattern UBER_RES_BANNER =
+            Pattern.compile("reservation request[^\"]*\$(\d+\.\d\d)[^\"]*(?:Pickup\s+([^\"]+))?",
+                    Pattern.CASE_INSENSITIVE);
     private static final Pattern UBER_RES_TRIP =
-            Pattern.compile("text=\"(\\d+) min \\((\\d+(?:\\.\\d+)?) mi\\) trip\"");
+            Pattern.compile("text=\"(\d+) mins? \((\d+(?:\.\d+)?) mi\)(?: trip)?\"");
     private static final Pattern UBER_RES_WHEN =
             Pattern.compile("upfront_offer_header_subtitle text=\"([^\"]*)\"");
 
-    private static final Pattern OCR_PRICE = Pattern.compile("\\$\\s?(\\d+(?:\\.\\d{1,2})?)");
-    private static final Pattern OCR_LEG =
-            Pattern.compile("(\\d+)\\s*mins?\\s*[^0-9A-Za-z\\s]{0,2}\\s*(\\d+(?:\\.\\d+)?)\\s*mi\\b");
+    private static final Pattern OCR_PRICE = Pattern.compile(
+            "(?<!\+)(?<!\+\s)\$\s*(\d{1,3}(?:\.\d{2})?)(?!\s*(?:/\s*h|hr|included|surge|flash|perk|bonus))",
+            Pattern.CASE_INSENSITIVE);
 
-    /** Offers visible in an accessibility dump. */
+    private static final Pattern OCR_LEG = Pattern.compile(
+            "(?:(\d+)\s*hrs?\s*)?(\d+)\s*m[iIl1]ns?\b[^0-9A-Za-z]{0,6}(\d+(?:\.\d+)?)\s*(m[iIl1]|ft)\b",
+            Pattern.CASE_INSENSITIVE);
+
     static List<Offer> fromTree(String body, double minRate, double hichMaxMiles, double hichMinScheduled) {
         List<Offer> out = new ArrayList<>();
         Matcher m = WIN.matcher(body);
@@ -135,7 +136,18 @@ final class Offers {
 
     private static Offer uberReservation(String seg, double minRate) {
         Matcher b = UBER_RES_BTN.matcher(seg);
-        if (!b.find()) return null;
+        if (!b.find()) {
+            Matcher banner = UBER_RES_BANNER.matcher(seg);
+            if (!banner.find()) return null;
+            Offer o = new Offer();
+            o.app = "uber";
+            o.kind = "reservation";
+            o.price = Double.parseDouble(banner.group(1));
+            String when = banner.group(2) != null ? banner.group(2).trim() : "";
+            o.verdict = "SKIP";
+            o.detail = "reservation banner" + (when.isEmpty() ? "" : " (" + when + ")");
+            return o;
+        }
         Offer o = new Offer();
         o.app = "uber";
         o.kind = "reservation";
@@ -153,7 +165,6 @@ final class Offers {
         return o;
     }
 
-    /** Uber live offer read from a screenshot (OCR). Returns an UNREAD offer if it cannot be parsed. */
     static Offer fromUberOcr(String ocr, double minRate) {
         Offer o = new Offer();
         o.app = "uber";
@@ -161,17 +172,32 @@ final class Offers {
         o.source = "ocr";
         o.raw = ocr == null ? "" : ocr;
         if (ocr == null) return o;
+
         Matcher p = OCR_PRICE.matcher(ocr);
-        if (p.find()) o.price = Double.parseDouble(p.group(1));
-        Matcher l = OCR_LEG.matcher(ocr);
-        if (l.find()) {
-            o.pickupMin = Double.parseDouble(l.group(1));
-            o.pickupMi = Double.parseDouble(l.group(2));
-            if (l.find()) {
-                o.tripMin = Double.parseDouble(l.group(1));
-                o.tripMi = Double.parseDouble(l.group(2));
+        while (p.find()) {
+            double candidate = Double.parseDouble(p.group(1));
+            if (candidate >= 3.00) {
+                o.price = candidate;
+                break;
+            } else if (o.price < 0) {
+                o.price = candidate;
             }
         }
+
+        Matcher l = OCR_LEG.matcher(ocr);
+        if (l.find()) {
+            double hrs = l.group(1) != null ? Double.parseDouble(l.group(1)) : 0;
+            o.pickupMin = hrs * 60.0 + Double.parseDouble(l.group(2));
+            double dist = Double.parseDouble(l.group(3));
+            o.pickupMi = "ft".equalsIgnoreCase(l.group(4)) ? Math.round((dist / 5280.0) * 100.0) / 100.0 : dist;
+            if (l.find()) {
+                double thrs = l.group(1) != null ? Double.parseDouble(l.group(1)) : 0;
+                o.tripMin = thrs * 60.0 + Double.parseDouble(l.group(2));
+                double tdist = Double.parseDouble(l.group(3));
+                o.tripMi = "ft".equalsIgnoreCase(l.group(4)) ? Math.round((tdist / 5280.0) * 100.0) / 100.0 : tdist;
+            }
+        }
+
         if (o.price > 0 && o.pickupMin >= 0 && o.tripMin > 0) {
             o.rate = o.price / ((o.pickupMin + o.tripMin) / 60.0);
             o.verdict = o.rate >= minRate ? "GOOD" : "SKIP";

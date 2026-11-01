@@ -16,6 +16,7 @@ import android.view.View;
 import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.EditText;
+import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.SeekBar;
@@ -32,7 +33,7 @@ import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-/** Dark, quiet main screen. The service itself shows nothing on screen except the good-offer pulse. */
+/** Dark, quiet main screen for Driverade v3.5 with Standby Mode and Info Pill customization. */
 public class MainActivity extends Activity {
     private static final int BG = 0xFF0E1116;
     private static final int CARD = 0xFF181D25;
@@ -46,10 +47,12 @@ public class MainActivity extends Activity {
     private TextView statusChip;
     private Button modeLog;
     private Button modeAlert;
+    private CheckBox standbyBox;
     private TextView modeHelp;
     private TextView statSeen;
     private TextView statGood;
     private TextView statBest;
+    private TextView diagSummary;
     private LinearLayout feed;
     private LinearLayout setupBody;
     private TextView stats;
@@ -58,6 +61,17 @@ public class MainActivity extends Activity {
     private EditText hichSched;
     private SeekBar opacity;
     private TextView opacityLabel;
+
+    private TextView pillPreview;
+    private Button[] fmtButtons = new Button[4];
+    private Button[] styleButtons = new Button[4];
+    private SeekBar pillSizeBar;
+    private TextView pillSizeLabel;
+    private SeekBar pillPosBar;
+    private TextView pillPosLabel;
+    private SeekBar pillDurBar;
+    private TextView pillDurLabel;
+
     private CheckBox vibrate;
     private CheckBox sound;
     private CheckBox alwaysBox;
@@ -86,15 +100,15 @@ public class MainActivity extends Activity {
         LinearLayout head = new LinearLayout(this);
         head.setOrientation(LinearLayout.HORIZONTAL);
         head.setGravity(Gravity.CENTER_VERTICAL);
-        TextView title = text("Driver Logger", 26, TEXT, true);
+        TextView title = text("Driverade", 26, TEXT, true);
         head.addView(title, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
         statusChip = text("", 14, TEXT, true);
         statusChip.setPadding(dp(12), dp(6), dp(12), dp(6));
         head.addView(statusChip);
         col.addView(head);
-        col.addView(text("v3.4", 12, MUTED, false));
+        col.addView(text("v3.5", 12, MUTED, false));
 
-        // ---- mode
+        // ---- mode & standby
         LinearLayout modeCard = card();
         modeCard.addView(text("MODE", 12, MUTED, true));
         LinearLayout seg = new LinearLayout(this);
@@ -107,12 +121,24 @@ public class MainActivity extends Activity {
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
         segLp.topMargin = dp(8);
         modeCard.addView(seg, segLp);
+
+        standbyBox = check("Standby Mode (pause background polling while app is open)");
+        standbyBox.setTextColor(AMBER);
+        standbyBox.setOnCheckedChangeListener((b, checked) -> {
+            Store.setStandby(MainActivity.this, checked);
+            refresh();
+        });
+        LinearLayout.LayoutParams sbLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        sbLp.topMargin = dp(8);
+        modeCard.addView(standbyBox, sbLp);
+
         modeHelp = text("", 13, MUTED, false);
         modeHelp.setPadding(0, dp(10), 0, 0);
         modeCard.addView(modeHelp);
         col.addView(modeCard);
 
-        // ---- today
+        // ---- today + diagnostics
         LinearLayout todayCard = card();
         todayCard.addView(text("TODAY", 12, MUTED, true));
         LinearLayout row = new LinearLayout(this);
@@ -124,6 +150,17 @@ public class MainActivity extends Activity {
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
         rowLp.topMargin = dp(8);
         todayCard.addView(row, rowLp);
+
+        View diagDivider = new View(this);
+        diagDivider.setBackgroundColor(LINE);
+        LinearLayout.LayoutParams divLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 1);
+        divLp.topMargin = dp(12);
+        divLp.bottomMargin = dp(8);
+        todayCard.addView(diagDivider, divLp);
+
+        diagSummary = text("", 12, MUTED, false);
+        todayCard.addView(diagSummary);
         col.addView(todayCard);
 
         // ---- recent offers
@@ -134,29 +171,163 @@ public class MainActivity extends Activity {
         feedCard.addView(feed);
         col.addView(feedCard);
 
-        // ---- settings
+        // ---- info pill appearance card
+        LinearLayout pillCard = card();
+        pillCard.addView(text("INFO PILL APPEARANCE", 12, MUTED, true));
+
+        FrameLayout previewBox = new FrameLayout(this);
+        previewBox.setBackground(round(0xFF0A0D12, 14));
+        previewBox.setPadding(dp(12), dp(16), dp(12), dp(16));
+        LinearLayout.LayoutParams prevBoxLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        prevBoxLp.topMargin = dp(10);
+        pillPreview = new TextView(this);
+        FrameLayout.LayoutParams pillPrevLp = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT);
+        pillPrevLp.gravity = Gravity.CENTER;
+        previewBox.addView(pillPreview, pillPrevLp);
+        pillCard.addView(previewBox, prevBoxLp);
+
+        TextView fmtTitle = text("Hourly display format", 13, MUTED, false);
+        fmtTitle.setPadding(0, dp(12), 0, dp(6));
+        pillCard.addView(fmtTitle);
+        String[] fmtLabels = {"Standard", "$/hr First", "$/hr Only", "2-Line Detail"};
+        LinearLayout fmtRow1 = new LinearLayout(this);
+        fmtRow1.setOrientation(LinearLayout.HORIZONTAL);
+        LinearLayout fmtRow2 = new LinearLayout(this);
+        fmtRow2.setOrientation(LinearLayout.HORIZONTAL);
+        for (int i = 0; i < 4; i++) {
+            final int idx = i;
+            Button b = choiceButton(fmtLabels[i], new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    Store.setPillFormat(MainActivity.this, idx);
+                    updatePillPreview();
+                }
+            });
+            fmtButtons[i] = b;
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, dp(42), 1f);
+            if (i % 2 == 1) lp.leftMargin = dp(8);
+            if (i < 2) fmtRow1.addView(b, lp);
+            else fmtRow2.addView(b, lp);
+        }
+        pillCard.addView(fmtRow1);
+        LinearLayout.LayoutParams r2Lp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        r2Lp.topMargin = dp(8);
+        pillCard.addView(fmtRow2, r2Lp);
+
+        TextView styleTitle = text("Pill color theme", 13, MUTED, false);
+        styleTitle.setPadding(0, dp(12), 0, dp(6));
+        pillCard.addView(styleTitle);
+        String[] styleLabels = {"Dark Slate", "Neon Green", "Matrix", "Gold"};
+        LinearLayout styleRow1 = new LinearLayout(this);
+        styleRow1.setOrientation(LinearLayout.HORIZONTAL);
+        LinearLayout styleRow2 = new LinearLayout(this);
+        styleRow2.setOrientation(LinearLayout.HORIZONTAL);
+        for (int i = 0; i < 4; i++) {
+            final int idx = i;
+            Button b = choiceButton(styleLabels[i], new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    Store.setPillStyle(MainActivity.this, idx);
+                    updatePillPreview();
+                }
+            });
+            styleButtons[i] = b;
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, dp(42), 1f);
+            if (i % 2 == 1) lp.leftMargin = dp(8);
+            if (i < 2) styleRow1.addView(b, lp);
+            else styleRow2.addView(b, lp);
+        }
+        pillCard.addView(styleRow1);
+        LinearLayout.LayoutParams sr2Lp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        sr2Lp.topMargin = dp(8);
+        pillCard.addView(styleRow2, sr2Lp);
+
+        pillSizeLabel = text("", 14, TEXT, false);
+        pillSizeLabel.setPadding(0, dp(12), 0, 0);
+        pillCard.addView(pillSizeLabel);
+        pillSizeBar = new SeekBar(this);
+        pillSizeBar.setMax(24);
+        pillSizeBar.setOnSeekBarChangeListener(new SimpleSeekListener() {
+            @Override
+            public void onProgressChanged(SeekBar s, int p, boolean fromUser) {
+                int sp = p + 14;
+                pillSizeLabel.setText("Pill text size: " + sp + " sp");
+                if (fromUser) {
+                    Store.savePillSettings(MainActivity.this, sp,
+                            pillPosBar.getProgress() + 3, pillDurBar.getProgress() + 2);
+                    updatePillPreview();
+                }
+            }
+        });
+        pillCard.addView(pillSizeBar);
+
+        pillPosLabel = text("", 14, TEXT, false);
+        pillPosLabel.setPadding(0, dp(10), 0, 0);
+        pillCard.addView(pillPosLabel);
+        pillPosBar = new SeekBar(this);
+        pillPosBar.setMax(82);
+        pillPosBar.setOnSeekBarChangeListener(new SimpleSeekListener() {
+            @Override
+            public void onProgressChanged(SeekBar s, int p, boolean fromUser) {
+                int pct = p + 3;
+                String zone = pct < 20 ? " (Top)" : pct < 55 ? " (Middle)" : " (Bottom)";
+                pillPosLabel.setText("Vertical screen position: " + pct + "%" + zone);
+                if (fromUser) {
+                    Store.savePillSettings(MainActivity.this, pillSizeBar.getProgress() + 14,
+                            pct, pillDurBar.getProgress() + 2);
+                }
+            }
+        });
+        pillCard.addView(pillPosBar);
+
+        pillDurLabel = text("", 14, TEXT, false);
+        pillDurLabel.setPadding(0, dp(10), 0, 0);
+        pillCard.addView(pillDurLabel);
+        pillDurBar = new SeekBar(this);
+        pillDurBar.setMax(6);
+        pillDurBar.setOnSeekBarChangeListener(new SimpleSeekListener() {
+            @Override
+            public void onProgressChanged(SeekBar s, int p, boolean fromUser) {
+                int sec = p + 2;
+                pillDurLabel.setText("Pill display duration: " + sec + " sec");
+                if (fromUser) {
+                    Store.savePillSettings(MainActivity.this, pillSizeBar.getProgress() + 14,
+                            pillPosBar.getProgress() + 3, sec);
+                }
+            }
+        });
+        pillCard.addView(pillDurBar);
+
+        pillCard.addView(flatButton("Test Pulse & Pill on Screen", LINE, new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                Offers.Offer sample = sampleOffer();
+                if (!LoggerService.triggerTestAlert(sample)) {
+                    toast("Turn on Driverade in Accessibility settings first to test the screen overlay");
+                }
+            }
+        }));
+        col.addView(pillCard);
+
+        // ---- thresholds & automation settings
         LinearLayout setCard = card();
-        setCard.addView(text("SETTINGS", 12, MUTED, true));
+        setCard.addView(text("THRESHOLDS & AUTOMATION", 12, MUTED, true));
         minRate = field(setCard, "Good offer / accept: at least $/hr");
         hichMiles = field(setCard, "hich live rides: pickup within (miles)");
-        hichSched = field(setCard, "hich scheduled rides: accept if the trip amount is at least $ (or the $/hr above is met)");
+        hichSched = field(setCard, "hich scheduled rides: accept if the trip amount is at least $ (or $/hr above is met)");
         opacityLabel = text("", 14, TEXT, false);
         opacityLabel.setPadding(0, dp(12), 0, 0);
         setCard.addView(opacityLabel);
         opacity = new SeekBar(this);
         opacity.setMax(55);
-        opacity.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+        opacity.setOnSeekBarChangeListener(new SimpleSeekListener() {
             @Override
             public void onProgressChanged(SeekBar s, int p, boolean fromUser) {
-                opacityLabel.setText("Flash strength: " + (p + 5) + "%");
-            }
-
-            @Override
-            public void onStartTrackingTouch(SeekBar s) {
-            }
-
-            @Override
-            public void onStopTrackingTouch(SeekBar s) {
+                opacityLabel.setText("Screen flash tint strength: " + (p + 5) + "%");
             }
         });
         setCard.addView(opacity);
@@ -164,13 +335,13 @@ public class MainActivity extends Activity {
         sound = check("Short beep on good offers");
         setCard.addView(vibrate);
         setCard.addView(sound);
-        autoPriority = check("Turn on Lyft Priority Mode automatically when it becomes available");
+        autoPriority = check("Turn on Lyft Priority Mode automatically when available");
         autoPriority.setOnCheckedChangeListener((b, checked) -> Store.setAutoPriority(MainActivity.this, checked));
         setCard.addView(autoPriority);
-        autoSched = check("Open hich scheduled rides automatically when a ride is waiting");
+        autoSched = check("Open hich scheduled rides automatically when waiting");
         autoSched.setOnCheckedChangeListener((b, checked) -> Store.setAutoSched(MainActivity.this, checked));
         setCard.addView(autoSched);
-        autoOnline = check("Go online in hich automatically when it is open and offline");
+        autoOnline = check("Go online in hich automatically when open and offline");
         autoOnline.setOnCheckedChangeListener((b, checked) -> Store.setAutoOnline(MainActivity.this, checked));
         setCard.addView(autoOnline);
         autoOpen = check("Open hich ride notifications automatically");
@@ -179,7 +350,7 @@ public class MainActivity extends Activity {
         autoAccept = check("Accept hich scheduled rides automatically when they qualify");
         autoAccept.setOnCheckedChangeListener((b, checked) -> Store.setAutoAccept(MainActivity.this, checked));
         setCard.addView(autoAccept);
-        quietOn = check("Quiet hours: no alerts, no hich accepting, no going online in hich");
+        quietOn = check("Quiet hours: no alerts, no hich accepting, no going online");
         quietOn.setOnCheckedChangeListener((b, checked) -> Store.setQuietOn(MainActivity.this, checked));
         setCard.addView(quietOn);
         quietStart = clockField(setCard, "Quiet hours start (for example 11:00 PM)");
@@ -192,7 +363,7 @@ public class MainActivity extends Activity {
         }));
         col.addView(setCard);
 
-        // ---- setup & data (collapsed)
+        // ---- setup & data
         LinearLayout setupCard = card();
         final Button toggle = flatButton("Setup & data  \u25be", LINE, null);
         toggle.setTextColor(TEXT);
@@ -208,8 +379,7 @@ public class MainActivity extends Activity {
                 toggle.setText(open ? "Setup & data  \u25be" : "Setup & data  \u25b4");
             }
         });
-        setupBody.addView(text("Turn the service on under Accessibility > Installed apps > Driver Logger. "
-                + "If the switch is greyed out: App info > three-dot menu > Allow restricted settings.", 13, MUTED, false));
+        setupBody.addView(text("Turn the service on under Accessibility > Installed apps > Driverade.", 13, MUTED, false));
         setupBody.addView(flatButton("Open Accessibility settings", LINE, new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -224,7 +394,7 @@ public class MainActivity extends Activity {
                 startActivity(i);
             }
         }));
-        alwaysBox = check("Keep a short rolling screenshot buffer even when no watched app is visible");
+        alwaysBox = check("Keep short screenshot buffer even when no watched app is visible");
         alwaysBox.setOnCheckedChangeListener((b, checked) -> Store.setAlways(MainActivity.this, checked));
         setupBody.addView(alwaysBox);
         setupBody.addView(text("Apps being watched (one package per line):", 13, MUTED, false));
@@ -249,7 +419,7 @@ public class MainActivity extends Activity {
                 export(true);
             }
         }));
-        setupBody.addView(flatButton("Export to Downloads (text only, smaller)", LINE, new View.OnClickListener() {
+        setupBody.addView(flatButton("Export to Downloads (text only)", LINE, new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 export(false);
@@ -259,7 +429,7 @@ public class MainActivity extends Activity {
             @Override
             public void onClick(View v) {
                 new AlertDialog.Builder(MainActivity.this)
-                        .setMessage("Delete all saved captures and offer history from this phone?")
+                        .setMessage("Delete all saved captures and offer history?")
                         .setPositiveButton("Delete", new DialogInterface.OnClickListener() {
                             @Override
                             public void onClick(DialogInterface d, int which) {
@@ -287,14 +457,53 @@ public class MainActivity extends Activity {
         refresh();
     }
 
-    // ---------------------------------------------------------------- data -> views
+    private Offers.Offer sampleOffer() {
+        Offers.Offer o = new Offers.Offer();
+        o.app = "uber";
+        o.kind = "live";
+        o.price = 18.68;
+        o.rate = 45.0;
+        o.pickupMin = 4;
+        o.pickupMi = 1.2;
+        o.tripMin = 16;
+        o.tripMi = 8.3;
+        o.verdict = "GOOD";
+        return o;
+    }
+
+    private void updatePillPreview() {
+        int fmt = Store.getPillFormat(this);
+        int style = Store.getPillStyle(this);
+        int sizeSp = Store.getPillSize(this);
+        for (int i = 0; i < fmtButtons.length; i++) {
+            styleSeg(fmtButtons[i], i == fmt);
+        }
+        for (int i = 0; i < styleButtons.length; i++) {
+            styleSeg(styleButtons[i], i == style);
+        }
+        String sampleText = Flasher.formatPillText(sampleOffer(), fmt);
+        Flasher.stylePillView(this, pillPreview, sampleText, style, sizeSp);
+    }
 
     private void loadSettings() {
         minRate.setText(trim(Store.getMinRate(this)));
         hichMiles.setText(trim(Store.getHichMiles(this)));
         hichSched.setText(trim(Store.getHichScheduled(this)));
         opacity.setProgress(Store.getOpacity(this) - 5);
-        opacityLabel.setText("Flash strength: " + Store.getOpacity(this) + "%");
+        opacityLabel.setText("Screen flash tint strength: " + Store.getOpacity(this) + "%");
+
+        int pSize = Store.getPillSize(this);
+        int pPos = Store.getPillPos(this);
+        int pDur = Store.getPillDuration(this);
+        pillSizeBar.setProgress(pSize - 14);
+        pillSizeLabel.setText("Pill text size: " + pSize + " sp");
+        pillPosBar.setProgress(pPos - 3);
+        String zone = pPos < 20 ? " (Top)" : pPos < 55 ? " (Middle)" : " (Bottom)";
+        pillPosLabel.setText("Vertical screen position: " + pPos + "%" + zone);
+        pillDurBar.setProgress(pDur - 2);
+        pillDurLabel.setText("Pill display duration: " + pDur + " sec");
+        updatePillPreview();
+
         vibrate.setChecked(Store.getVibrate(this));
         sound.setChecked(Store.getSound(this));
         alwaysBox.setChecked(Store.isAlways(this));
@@ -307,12 +516,17 @@ public class MainActivity extends Activity {
         quietStart.setText(Rules.clockText(Store.getQuietStart(this)));
         quietEnd.setText(Rules.clockText(Store.getQuietEnd(this)));
         appsBox.setText(Store.getAppsText(this));
+        standbyBox.setChecked(Store.isStandby(this));
     }
 
     private void saveSettings() {
         Store.saveSettings(this,
                 num(minRate, 32f), num(hichMiles, 5f), num(hichSched, 20f),
                 opacity.getProgress() + 5, vibrate.isChecked(), sound.isChecked());
+        Store.savePillSettings(this,
+                pillSizeBar.getProgress() + 14,
+                pillPosBar.getProgress() + 3,
+                pillDurBar.getProgress() + 2);
         int qs = Rules.parseClock(quietStart.getText().toString());
         int qe = Rules.parseClock(quietEnd.getText().toString());
         if (qs < 0 || qe < 0) {
@@ -320,25 +534,44 @@ public class MainActivity extends Activity {
             return;
         }
         Store.setQuietHours(this, qs, qe);
+        updatePillPreview();
         toast("Saved");
     }
 
     private void refresh() {
         boolean on = isServiceOn();
-        statusChip.setText(on ? "\u25cf ON" : "\u25cf OFF");
-        statusChip.setBackground(round(on ? 0x332ECC71 : 0x33E5484D, 20));
-        statusChip.setTextColor(on ? GREEN : RED);
+        boolean standby = Store.isStandby(this);
+
+        if (standby) {
+            statusChip.setText("\u25cf STANDBY");
+            statusChip.setBackground(round(0x33F5A524, 20));
+            statusChip.setTextColor(AMBER);
+        } else {
+            statusChip.setText(on ? "\u25cf ON" : "\u25cf OFF");
+            statusChip.setBackground(round(on ? 0x332ECC71 : 0x33E5484D, 20));
+            statusChip.setTextColor(on ? GREEN : RED);
+        }
 
         int mode = Store.getMode(this);
         styleSeg(modeLog, mode == Store.MODE_LOG);
         styleSeg(modeAlert, mode == Store.MODE_ALERT);
-        modeHelp.setText(mode == Store.MODE_ALERT
-                ? "Good offers pulse the screen (and vibrate). On Uber and Lyft you still tap Accept / Match yourself. hich scheduled rides are accepted by the app (see settings)."
-                : "Offers are only recorded. Nothing appears on screen while you drive.");
+        modeHelp.setText(standby
+                ? "Standby Mode is active: background polling and accessibility processing are paused while you have the app open."
+                : (mode == Store.MODE_ALERT
+                ? "Good offers pulse the screen and show your customized hourly pill. On Uber and Lyft you tap Accept / Match yourself."
+                : "Offers are only recorded. Nothing appears on screen while you drive."));
 
         double mb = Store.bytes(this) / (1024.0 * 1024.0);
         stats.setText(String.format(Locale.US, "%d text captures, %d screenshots, %.1f MB",
                 Store.count(this, ".txt"), Store.count(this, ".jpg"), mb));
+
+        int ocrRuns = Store.getDiag(this, Store.KEY_DIAG_OCR_RUNS);
+        int ocrRetries = Store.getDiag(this, Store.KEY_DIAG_OCR_RETRIES);
+        int ocrUnread = Store.getDiag(this, Store.KEY_DIAG_OCR_UNREAD);
+        int shotFails = Store.getDiag(this, Store.KEY_DIAG_SHOT_FAILS);
+        diagSummary.setText(String.format(Locale.US,
+                "OCR reads: %d  \u00b7  Auto-retries: %d  \u00b7  Unread: %d  \u00b7  Shot blocks: %d",
+                ocrRuns, ocrRetries, ocrUnread, shotFails));
 
         List<JSONObject> offers = Store.recentOffers(this, 200);
         Calendar cal = Calendar.getInstance();
@@ -446,8 +679,6 @@ public class MainActivity extends Activity {
         });
     }
 
-    // ---------------------------------------------------------------- view helpers
-
     private Button segButton(String label, final int mode) {
         Button b = new Button(this);
         b.setText(label);
@@ -463,7 +694,17 @@ public class MainActivity extends Activity {
         return b;
     }
 
+    private Button choiceButton(String label, View.OnClickListener l) {
+        Button b = new Button(this);
+        b.setText(label);
+        b.setAllCaps(false);
+        b.setTextSize(13);
+        b.setOnClickListener(l);
+        return b;
+    }
+
     private void styleSeg(Button b, boolean selected) {
+        if (b == null) return;
         b.setBackground(round(selected ? GREEN : LINE, 12));
         b.setTextColor(selected ? 0xFF06210F : TEXT);
         b.setTypeface(null, selected ? Typeface.BOLD : Typeface.NORMAL);
@@ -573,5 +814,13 @@ public class MainActivity extends Activity {
 
     private int dp(int v) {
         return Math.round(v * getResources().getDisplayMetrics().density);
+    }
+
+    private abstract static class SimpleSeekListener implements SeekBar.OnSeekBarChangeListener {
+        @Override
+        public void onStartTrackingTouch(SeekBar s) {}
+
+        @Override
+        public void onStopTrackingTouch(SeekBar s) {}
     }
 }
