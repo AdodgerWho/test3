@@ -65,8 +65,8 @@ public class LoggerService extends AccessibilityService {
     static volatile LoggerService instance = null;
 
     private static final Pattern ACCEPT = Pattern.compile("(text|desc)=\"(Accept|Match)( \u2022[^"]*)?\"");
-    private static final Pattern HAS_DOLLAR = Pattern.compile("(text|desc)="[^"]*\$\d+");
-    private static final Pattern BOUNDS_STRIP = Pattern.compile(" bounds=-?\d+,-?\d+,-?\d+,-?\d+");
+    private static final Pattern HAS_DOLLAR = Pattern.compile("(text|desc)=\"[^"]*\\$\\d+");
+    private static final Pattern BOUNDS_STRIP = Pattern.compile(" bounds=-?\\d+,-?\\d+,-?\\d+,-?\\d+");
     private static final String[] MARKERS = {
             "text=\"Decline\"", "Reject ride", "est. rate for this ride", "eservation request",
             "request matching", "Matched to trip", "xclusive", "Scheduled ride", "Trip Radar",
@@ -88,7 +88,7 @@ public class LoggerService extends AccessibilityService {
     private static final long HICH_ONLINE_REPEAT_MS = 600000;
     private static final long HICH_OPEN_GAP_MS = 3000;
     private static final long HICH_ACCEPT_RETRY_MS = 2500;
-    private static final Pattern OFFLINE = Pattern.compile("You.re offline", Pattern.CASE_INSENSITIVE);
+    private static final Pattern OFFLINE = Pattern.compile("You're offline", Pattern.CASE_INSENSITIVE);
     private static final long PRIORITY_GAP_MS = 6000;
     private static final long PRIORITY_NOTE_GAP_MS = 30000;
     private static final long OFFER_REPEAT_MS = 90000;
