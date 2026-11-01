@@ -26,9 +26,9 @@ public class LoggerService extends AccessibilityService {
     static volatile LoggerService instance = null;
 
     private static final Pattern ACCEPT =
-            Pattern.compile("(text|desc)=\"(Accept|Match)( \\u2022[^"]*)?\"");
+            Pattern.compile("(text|desc)=\"(Accept|Match)( •[^\"]*)?\"");
     private static final Pattern HAS_DOLLAR =
-            Pattern.compile("(text|desc)=\"[^"]*\\$\\d+");
+            Pattern.compile("(text|desc)=\"[^\"]*\\$\\d+");
     private static final Pattern BOUNDS_STRIP =
             Pattern.compile(" bounds=-?\\d+,-?\\d+,-?\\d+,-?\\d+");
     private static final String[] MARKERS = {
