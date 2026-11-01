@@ -2,7 +2,7 @@ name: Build Android APK
 
 on:
   push:
-    branches: [ main, master, v3.5 ]
+    branches: [ main, master ]
   pull_request:
     branches: [ main, master ]
 
@@ -20,15 +20,14 @@ jobs:
         distribution: 'temurin'
         java-version: '17'
 
-    - name: Setup Gradle
-      uses: gradle/actions/setup-gradle@v3
+    - name: Generate Gradle Wrapper
+      run: gradle wrapper --gradle-version 8.7
 
     - name: Grant execute permission for gradlew
       run: chmod +x gradlew
-      continue-on-error: true
 
     - name: Build Debug APK with Gradle
-      run: ./app/../gradlew assembleDebug
+      run: ./gradlew assembleDebug
 
     - name: Upload APK Artifact
       uses: actions/upload-artifact@v4
