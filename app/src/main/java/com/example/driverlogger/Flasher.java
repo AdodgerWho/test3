@@ -10,6 +10,7 @@ import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.media.AudioManager;
 import android.media.ToneGenerator;
+import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.VibrationEffect;
@@ -161,10 +162,17 @@ final class Flasher {
                 root.addView(pill, lp);
             }
 
+            int overlayType;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                overlayType = WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY;
+            } else {
+                overlayType = WindowManager.LayoutParams.TYPE_PHONE;
+            }
+
             WindowManager.LayoutParams p = new WindowManager.LayoutParams(
                     WindowManager.LayoutParams.MATCH_PARENT,
                     WindowManager.LayoutParams.MATCH_PARENT,
-                    WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                    overlayType,
                     WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
                             | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
                             | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
