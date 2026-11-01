@@ -5,17 +5,21 @@ import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+/**
+ * Turns screen text into offers. Pure Java (no Android classes) so it can be tested on a computer.
+ * Reads either the accessibility-tree dump (Lyft, hich, Uber reservations) or OCR text (Uber live offers).
+ */
 final class Offers {
     private Offers() {}
 
     static final class Offer {
-        String app;
-        String kind;
+        String app;        // uber | lyft | hich
+        String kind;       // live | reservation | scheduled
         double price = -1;
-        double rate = -1;
+        double rate = -1;  // dollars per hour (from the app, or computed)
         double pickupMin = -1, pickupMi = -1, tripMin = -1, tripMi = -1;
-        String verdict = "UNREAD";
-        String source = "tree";
+        String verdict = "UNREAD"; // GOOD | SKIP | UNREAD
+        String source = "tree";    // tree | ocr
         String detail = "";
         String raw = "";
 
@@ -24,36 +28,46 @@ final class Offers {
         }
     }
 
-    private static final Pattern WIN = Pattern.compile("=== WINDOW (\S+) layer=(-?\d+) ===\n");
+    private static final Pattern WIN = Pattern.compile("=== WINDOW (\\S+) layer=(-?\\d+) ===\\n");
+
     private static final Pattern LYFT_RATE =
-            Pattern.compile("text=\"\$(\d+(?:\.\d+)?)/hr est\. rate for this ride\"");
-    private static final Pattern MONEY_TEXT = Pattern.compile("text=\"\$(\d+\.\d\d)\"");
+            Pattern.compile("text=\"\\$(\\d+(?:\\.\\d+)?)/hr est\\. rate for this ride\"");
+    private static final Pattern MONEY_TEXT = Pattern.compile("text=\"\\$(\\d+\\.\\d\\d)\"");
     private static final Pattern LYFT_LEG =
-            Pattern.compile("text=\"(\d+) min • (\d+(?:\.\d+)?) mi\"");
+            Pattern.compile("text=\"(\\d+) min \u2022 (\\d+(?:\\.\\d+)?) mi\"");
 
-    private static final Pattern HICH_PRICE = Pattern.compile("desc=\"\$(\d+\.\d\d)\"");
+    private static final Pattern HICH_PRICE = Pattern.compile("desc=\"\\$(\\d+\\.\\d\\d)\"");
     private static final Pattern HICH_AWAY =
-            Pattern.compile("desc=\"(\d+) mins? \((\d+(?:\.\d+)?) mi\) away\"");
+            Pattern.compile("desc=\"(\\d+) mins? \\((\\d+(?:\\.\\d+)?) mi\\) away\"");
     private static final Pattern HICH_TRIP =
-            Pattern.compile("desc=\"(\d+) mins? \((\d+(?:\.\d+)?) mi\) trip\"");
+            Pattern.compile("desc=\"(\\d+) mins? \\((\\d+(?:\\.\\d+)?) mi\\) trip\"");
 
-    private static final Pattern UBER_RES_BTN = Pattern.compile("text=\"Accept • \$(\d+\.\d\d)\"");
+    private static final Pattern UBER_RES_BTN = Pattern.compile("text=\"Accept \u2022 \\$(\\d+\\.\\d\\d)\"");
     private static final Pattern UBER_RES_BANNER =
-            Pattern.compile("reservation request[^\"]*\$(\d+\.\d\d)[^\"]*(?:Pickup\s+([^\"]+))?",
+            Pattern.compile("reservation request[^\\"]*\\$(\\d+\\.\\d\\d)[^\\"]*(?:Pickup\\s+([^\\"]+))?",
                     Pattern.CASE_INSENSITIVE);
     private static final Pattern UBER_RES_TRIP =
-            Pattern.compile("text=\"(\d+) mins? \((\d+(?:\.\d+)?) mi\)(?: trip)?\"");
+            Pattern.compile("text=\"(\\d+) mins? \\((\\d+(?:\\.\\d+)?) mi\\)(?: trip)?\"");
     private static final Pattern UBER_RES_WHEN =
             Pattern.compile("upfront_offer_header_subtitle text=\"([^\"]*)\"");
 
+    /**
+     * Matches $ prices not preceded by '+' (ignores +$3.50 Flash/Surge pills)
+     * and not immediately followed by '/hr' or 'included'.
+     */
     private static final Pattern OCR_PRICE = Pattern.compile(
-            "(?<!\+)(?<!\+\s)\$\s*(\d{1,3}(?:\.\d{2})?)(?!\s*(?:/\s*h|hr|included|surge|flash|perk|bonus))",
+            "(?<!\\+)(?<!\\+\\s)\\$\\s*(\\d{1,3}(?:\\.\\d{2})?)(?!\\s*(?:/\\s*h|hr|included|surge|flash|perk|bonus))",
             Pattern.CASE_INSENSITIVE);
 
+    /**
+     * Tolerates ML Kit OCR reading 'min' as 'mln'/'mIn' and 'mi' as 'ml'/'mI',
+     * parentheses/bullets between min and mi, or feet ('ft') on short pickups.
+     */
     private static final Pattern OCR_LEG = Pattern.compile(
-            "(?:(\d+)\s*hrs?\s*)?(\d+)\s*m[iIl1]ns?\b[^0-9A-Za-z]{0,6}(\d+(?:\.\d+)?)\s*(m[iIl1]|ft)\b",
+            "(?:(\\d+)\\s*hrs?\\s*)?(\\d+)\\s*m[iIl1]ns?\\b[^0-9A-Za-z]{0,6}(\\d+(?:\\.\\d+)?)\\s*(m[iIl1]|ft)\\b",
             Pattern.CASE_INSENSITIVE);
 
+    /** Offers visible in an accessibility dump. */
     static List<Offer> fromTree(String body, double minRate, double hichMaxMiles, double hichMinScheduled) {
         List<Offer> out = new ArrayList<>();
         Matcher m = WIN.matcher(body);
@@ -165,6 +179,7 @@ final class Offers {
         return o;
     }
 
+    /** Uber live offer read from a screenshot (OCR). Returns an UNREAD offer if it cannot be parsed. */
     static Offer fromUberOcr(String ocr, double minRate) {
         Offer o = new Offer();
         o.app = "uber";
@@ -213,3 +228,4 @@ final class Offers {
         return String.valueOf(d);
     }
 }
+
