@@ -20,16 +20,13 @@ jobs:
         distribution: 'temurin'
         java-version: '17'
 
-    - name: Setup Gradle Wrapper Jar
-      run: |
-        mkdir -p gradle/wrapper
-        wget -O gradle/wrapper/gradle-wrapper.jar https://github.com/gradle/gradle/raw/v8.7.0/subprojects/wrapper/src/integTest/resources/org/gradle/integtests/wrapper/Cj/gradle-wrapper.jar || curl -L -o gradle/wrapper/gradle-wrapper.jar https://github.com/gradle/gradle/raw/v8.7.0/subprojects/wrapper/src/integTest/resources/org/gradle/integtests/wrapper/Cj/gradle-wrapper.jar
+    - name: Setup Gradle
+      uses: gradle/actions/setup-gradle@v3
+      with:
+        gradle-version: '8.7'
 
-    - name: Grant execute permission for gradlew
-      run: chmod +x gradlew
-
-    - name: Build Debug APK with Gradle
-      run: ./gradlew assembleDebug
+    - name: Build Debug APK with System Gradle
+      run: gradle assembleDebug
 
     - name: Upload APK Artifact
       uses: actions/upload-artifact@v4
