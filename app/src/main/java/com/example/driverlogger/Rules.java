@@ -45,15 +45,15 @@ final class Rules {
         double rate = -1;
     }
 
-    private static final Pattern RIDE_ID = Pattern.compile("Ride ID #(\d+)");
-    private static final Pattern STATUS = Pattern.compile("Trip Status (\w+)");
-    private static final Pattern AMOUNT = Pattern.compile("Trip amount\s+\$(\d+(?:\.\d{1,2})?)");
+    private static final Pattern RIDE_ID = Pattern.compile("Ride ID #(\\d+)");
+    private static final Pattern STATUS = Pattern.compile("Trip Status (\\w+)");
+    private static final Pattern AMOUNT = Pattern.compile("Trip amount\\s+\\$(\\d+(?:\\.\\d{1,2})?)");
     private static final Pattern DURATION = Pattern.compile("Est Duration (.*?) Pickup Time");
-    private static final Pattern CLOCK = Pattern.compile("Pickup Time (\d{1,2}):(\d{2})\s*([AaPp][Mm])");
+    private static final Pattern CLOCK = Pattern.compile("Pickup Time (\\d{1,2}):(\\d{2})\\s*([AaPp][Mm])");
     private static final Pattern AWAY =
-            Pattern.compile("(\d+) mins? \((\d+(?:\.\d+)?) mi\) away");
-    private static final Pattern DATE = Pattern.compile("Date (\w{3}, \w{3} \d{1,2})");
-    private static final Pattern WIN = Pattern.compile("=== WINDOW (\S+) layer=(-?\d+) ===\n");
+            Pattern.compile("(\\d+) mins? \\((\\d+(?:\\.\\d+)?) mi\\) away");
+    private static final Pattern DATE = Pattern.compile("Date (\\w{3}, \\w{3} \\d{1,2})");
+    private static final Pattern WIN = Pattern.compile("=== WINDOW (\\S+) layer=(-?\\d+) ===\\n");
 
     static List<String> segmentsFor(String body, String pkg) {
         List<String> out = new ArrayList<>();
@@ -103,12 +103,12 @@ final class Rules {
     static double parseDuration(String t) {
         double total = 0;
         boolean found = false;
-        Matcher h = Pattern.compile("(\d+)\s*h").matcher(t);
+        Matcher h = Pattern.compile("(\\d+)\\s*h").matcher(t);
         if (h.find()) {
             total += 60 * Double.parseDouble(h.group(1));
             found = true;
         }
-        Matcher mi = Pattern.compile("(\d+)\s*m").matcher(t);
+        Matcher mi = Pattern.compile("(\\d+)\\s*m").matcher(t);
         if (mi.find()) {
             total += Double.parseDouble(mi.group(1));
             found = true;
@@ -117,7 +117,7 @@ final class Rules {
     }
 
     static Decision decide(Scheduled s, double minAmount, double minRate,
-                           boolean quietOn, int quietStart, int quietEnd, long waitedMs) {
+                            boolean quietOn, int quietStart, int quietEnd, long waitedMs) {
         Decision d = new Decision();
         if (s.price < 0 || s.pickupMinuteOfDay < 0) {
             d.verdict = "UNREAD";
@@ -158,7 +158,7 @@ final class Rules {
 
     static int parseClock(String s) {
         if (s == null) return -1;
-        Matcher m = Pattern.compile("^\s*(\d{1,2})(?:[:.](\d{2}))?\s*([AaPp][Mm])?\s*$").matcher(s);
+        Matcher m = Pattern.compile("^\\s*(\\d{1,2})(?:[:.](\\d{2}))?\\s*([AaPp][Mm])?\\s*$").matcher(s);
         if (!m.find()) return -1;
         int h = Integer.parseInt(m.group(1));
         int min = m.group(2) == null ? 0 : Integer.parseInt(m.group(2));
@@ -183,3 +183,4 @@ final class Rules {
         return d == Math.rint(d) ? String.valueOf((long) d) : String.format(Locale.US, "%.2f", d);
     }
 }
+
