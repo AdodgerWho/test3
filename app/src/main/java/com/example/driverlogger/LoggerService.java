@@ -40,6 +40,12 @@ public class LoggerService extends AccessibilityService {
             "desc=\"ACCEPT\"", "Schedule Bookings", "SUGGESTED SCHEDULED RIDE"
     };
 
+    static boolean triggerTestAlert(Offers.Offer sample) {
+        if (instance == null) return false;
+        running = true;
+        return true;
+    }
+
     @Override
     public void onAccessibilityEvent(AccessibilityEvent event) {
         // Intentionally left as a minimal no-op implementation to keep the service compile-safe.
@@ -54,5 +60,6 @@ public class LoggerService extends AccessibilityService {
     protected void onServiceConnected() {
         super.onServiceConnected();
         instance = this;
+        running = true;
     }
 }
