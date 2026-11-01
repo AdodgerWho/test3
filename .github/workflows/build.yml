@@ -20,8 +20,10 @@ jobs:
         distribution: 'temurin'
         java-version: '17'
 
-    - name: Generate Gradle Wrapper
-      run: gradle wrapper --gradle-version 8.7
+    - name: Setup Gradle Wrapper Jar
+      run: |
+        mkdir -p gradle/wrapper
+        wget -O gradle/wrapper/gradle-wrapper.jar https://github.com/gradle/gradle/raw/v8.7.0/subprojects/wrapper/src/integTest/resources/org/gradle/integtests/wrapper/Cj/gradle-wrapper.jar || curl -L -o gradle/wrapper/gradle-wrapper.jar https://github.com/gradle/gradle/raw/v8.7.0/subprojects/wrapper/src/integTest/resources/org/gradle/integtests/wrapper/Cj/gradle-wrapper.jar
 
     - name: Grant execute permission for gradlew
       run: chmod +x gradlew
