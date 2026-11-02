@@ -1,17 +1,11 @@
 package com.driverade.service
 
 import android.view.accessibility.AccessibilityNodeInfo
-import android.util.Log
 
 class OptimizedOfferEngine(
     private val targetHourlyRate: Double,
     private val minPayout: Double
 ) {
-    companion object {
-        private const val TAG = "OptimizedOfferEngine"
-    }
-
-    // Smart State Cache (Diffing) to prevent redundant redraws
     private var lastCachedFare: Double = -1.0
     private var lastCachedRate: Double = -1.0
 
@@ -20,9 +14,8 @@ class OptimizedOfferEngine(
     fun evaluateNode(rootNode: AccessibilityNodeInfo): Metrics? {
         val metrics = findAndParseOffer(rootNode) ?: return null
 
-        // Diffing check: Skip update if metrics haven't changed
         if (metrics.fare == lastCachedFare && metrics.hourlyRate == lastCachedRate) {
-            return null // No change, avoid redundant UI updates
+            return null 
         }
 
         lastCachedFare = metrics.fare
@@ -31,7 +24,6 @@ class OptimizedOfferEngine(
     }
 
     private fun findAndParseOffer(node: AccessibilityNodeInfo): Metrics? {
-        // Targeted pruning with early exit
         fun traverse(current: AccessibilityNodeInfo): Metrics? {
             val text = current.text?.toString() ?: ""
             val desc = current.contentDescription?.toString() ?: ""
@@ -42,19 +34,22 @@ class OptimizedOfferEngine(
                 val metrics = Metrics()
                 parseMetrics(current, metrics)
                 if (metrics.fare > 0.0 || metrics.hourlyRate > 0.0) {
-                    return metrics // Early exit on first valid match
+                    return metrics 
                 }
             }
 
             for (i in 0 until current.childCount) {
                 current.getChild(i)?.let { child ->
-                    val result = traverse(child)
-                    if (result != null) return result
+                    try {
+                        val result = traverse(child)
+                        if (result != null) return result
+                    } finally {
+                        child.recycle()
+                    }
                 }
             }
             return null
         }
-
         return traverse(node)
     }
 
@@ -68,7 +63,13 @@ class OptimizedOfferEngine(
                 text.replace(Regex("[^\d.]"), "").toDoubleOrNull()?.let { metrics.hourlyRate = it }
             }
             for (i in 0 until current.childCount) {
-                current.getChild(i)?.let { extract(it) }
+                current.getChild(i)?.let { child ->
+                    try {
+                        extract(child)
+                    } finally {
+                        child.recycle()
+                    }
+                }
             }
         }
         extract(cardNode)
