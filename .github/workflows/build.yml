@@ -11,22 +11,26 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v4
+    - name: Checkout repository
+      uses: actions/checkout@v4
 
-    - name: set up JDK 17
+    - name: Set up JDK 17
       uses: actions/setup-java@v4
       with:
         distribution: 'temurin'
         java-version: '17'
 
-    - name: Grant execute permission for gradlew
-      run: chmod +x gradlew
+    - name: Setup Android SDK
+      uses: android-actions/setup-android@v3
 
-    - name: Build APK with Gradle
+    - name: Validate Gradle Wrapper
+      uses: gradle/actions/setup-gradle@v3
+
+    - name: Build Debug APK
       run: ./gradlew assembleDebug
 
     - name: Upload APK Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: driverade-debug-apk
-        path: app/build/outputs/apk/debug/app-debug.json
+        name: app-debug-apk
+        path: app/build/outputs/apk/debug/app-debug.apk
